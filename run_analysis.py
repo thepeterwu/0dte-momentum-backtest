@@ -12,8 +12,8 @@ def evaluate_signals(df):
     fwd_ret_30 = df["fwd_return_30s"].to_numpy()
     fwd_ret_10 = df["fwd_return_10s"].to_numpy()
     fwd_ret_5 = df["fwd_return_5s"].to_numpy()
-    fwd_ret = fwd_ret_5
-    fwd_shift = 5
+    fwd_ret = fwd_ret_30
+    fwd_shift = 30
 
     # Calculate Information Coefficients (Spearman Rank Correlation)
     ic_imb, p_imb = stats.spearmanr(imb, fwd_ret)
@@ -72,7 +72,9 @@ def main():
     print(f"\nAll days processed. Total aggregated bars: {len(full_dataset):,}")
 
     # Run statistical diagnostics
-    evaluate_signals(full_dataset)
+    median_vol = full_dataset["volume"].median()
+    liquid_bars = full_dataset.filter(pl.col("volume") > median_vol)
+    evaluate_signals(liquid_bars)
 
 
 if __name__ == "__main__":
