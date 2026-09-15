@@ -1,7 +1,8 @@
-from src.data_loader import load_mbo_trades
+from src.data_loader import load_mbo_trades, get_or_convert_parquet_files
 from src.signals import generate_micro_bars_and_signals
 import scipy.stats as stats
 import numpy as np
+import polars as pl
 
 
 def evaluate_signals(df):
@@ -10,18 +11,19 @@ def evaluate_signals(df):
     zscore = df["z_score_breakout"].to_numpy()
     fwd_ret = df["fwd_return_30s"].to_numpy()
 
-    # 1. Calculate Information Coefficients (Spearman Rank Correlation)
+    # Calculate Information Coefficients (Spearman Rank Correlation)
     ic_imb, p_imb = stats.spearmanr(imb, fwd_ret)
     ic_z, p_z = stats.spearmanr(zscore, fwd_ret)
 
     print("==================================================")
-    print("           SIGNAL PREDICTIVE POWER (IC)           ")
+    print("           SIGNAL PREDICTIVE POWER (Time period)  ")
     print("==================================================")
+    print(f"Total Sample Bars  : {len(df):,}")
     print(f"Trade Imbalance IC : {ic_imb:+.4f} (p-value: {p_imb:.2e})")
     print(f"Z-Score Breakout IC: {ic_z:+.4f} (p-value: {p_z:.2e})")
     print("==================================================")
 
-    # 2. Check Conditional Edge (in Basis Points)
+    # Check Conditional Edge (in Basis Points)
     # Long threshold: Imbalance > 0.6 | Short threshold: Imbalance < -0.6
     long_mask = imb > 0.6
     short_mask = imb < -0.6
@@ -30,23 +32,32 @@ def evaluate_signals(df):
     avg_short_bps = np.mean(fwd_ret[short_mask]) * 10000 if np.any(short_mask) else 0.0
 
     print("\n--- Conditional Forward 30s Edge ---")
-    print(f"Sample Count (Imbalance >  0.6): {np.sum(long_mask)}")
-    print(f"Mean Return  (Imbalance >  0.6): {avg_long_bps:+.2f} bps")
-    print(f"Sample Count (Imbalance < -0.6): {np.sum(short_mask)}")
-    print(f"Mean Return  (Imbalance < -0.6): {avg_short_bps:+.2f} bps")
+    print(f"Long  (Imbalance >  0.6) [{np.sum(long_mask):,} bars]: {avg_long_bps:+.2f} bps")
+    print(f"Short (Imbalance < -0.6) [{np.sum(short_mask):,} bars]: {avg_short_bps:+.2f} bps")
 
 
 def main():
-    parquet_path = "data/raw_mbo.parquet"
-    print("Loading filtered executions from Parquet...")
-    trades_df = load_mbo_trades(parquet_path)
+    data_dir = "data"
+    parquet_paths = get_or_convert_parquet_files(data_dir="data", max_workers=4)
+    daily_feature_dfs = []
+    print("\nProcessing daily files...")
 
-    print("Constructing 5-second bars and signals...")
-    feature_df = generate_micro_bars_and_signals(trades_df)
+    # Extract signals per day
+    for path in parquet_paths:
+        trades = load_mbo_trades(path)
+        day_signals = generate_micro_bars_and_signals(trades)
+        if len(day_signals) > 0:
+            daily_feature_dfs.append(day_signals)
+            print(f"  {path.name}: {len(day_signals):,} bars")
 
-    print(f"Processed {len(feature_df):,} bars. Running diagnostics...")
-    evaluate_signals(feature_df)
+    # Stack all 23 days
+    full_dataset = pl.concat(daily_feature_dfs)
+    print(f"\nAll days processed. Total aggregated bars: {len(full_dataset):,}")
+
+    # Run statistical diagnostics
+    evaluate_signals(full_dataset)
 
 
 if __name__ == "__main__":
     main()
+

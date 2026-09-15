@@ -2,7 +2,10 @@ import polars as pl
 
 
 def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
-    # 1. Aggregate trades into 5-second dynamic intervals
+    if trades_df.is_empty():
+        return pl.DataFrame()
+
+    # Aggregate trades into 5-second dynamic intervals
     bars = (
         trades_df.group_by_dynamic("ts_event", every="5s")
         .agg([
@@ -18,11 +21,11 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
         ])
     )
 
-    # 2. Compute signals and forward returns
+    # Compute signals and forward returns
     processed = (
         bars
         .with_columns([
-            # Signal 1: Normalized Trade Flow Imbalance
+            # Normalized Trade Flow Imbalance [-1.0, 1.0]
             ((pl.col("buy_vol") - pl.col("sell_vol")) /
              (pl.col("buy_vol") + pl.col("sell_vol") + 1e-6)).alias("trade_imbalance"),
 
@@ -34,10 +37,11 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             ((pl.col("close").shift(-6) - pl.col("close")) / pl.col("close")).alias("fwd_return_30s")
         ])
         .with_columns([
-            # Signal 2: Z-Score Breakout
+            # Z-Score Breakout
             ((pl.col("close") - pl.col("ma_20")) / (pl.col("std_20") + 1e-6)).alias("z_score_breakout")
         ])
         .drop_nulls()
     )
 
     return processed
+
