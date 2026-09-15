@@ -15,9 +15,9 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("price").last().alias("close"),
             pl.col("size").sum().alias("volume"),
             # Buy volume: aggressor hit the Ask (side == 'A')
-            pl.col("size").filter(pl.col("side") == "A").sum().fill_null(0).alias("buy_vol"),
+            pl.col("size").filter(pl.col("side") == "A").sum().fill_null(0).cast(pl.Float64).alias("sell_vol"),
             # Sell volume: aggressor hit the Bid (side == 'B')
-            pl.col("size").filter(pl.col("side") == "B").sum().fill_null(0).alias("sell_vol"),
+            pl.col("size").filter(pl.col("side") == "B").sum().fill_null(0).cast(pl.Float64).alias("buy_vol"),
         ])
     )
 
@@ -33,8 +33,10 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("close").rolling_mean(window_size=20).alias("ma_20"),
             pl.col("close").rolling_std(window_size=20).alias("std_20"),
 
-            # Target: Forward 30-second return (6 five-second bars ahead)
-            ((pl.col("close").shift(-6) - pl.col("close")) / pl.col("close")).alias("fwd_return_30s")
+            # Target: Forward X-second return (X/5 five-second bars ahead)
+            ((pl.col("close").shift(-6) - pl.col("close")) / pl.col("close")).alias("fwd_return_30s"),
+            ((pl.col("close").shift(-2) - pl.col("close")) / pl.col("close")).alias("fwd_return_10s"),
+            ((pl.col("close").shift(-1) - pl.col("close")) / pl.col("close")).alias("fwd_return_5s")
         ])
         .with_columns([
             # Z-Score Breakout

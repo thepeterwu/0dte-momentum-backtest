@@ -9,7 +9,11 @@ def evaluate_signals(df):
     # Extract arrays
     imb = df["trade_imbalance"].to_numpy()
     zscore = df["z_score_breakout"].to_numpy()
-    fwd_ret = df["fwd_return_30s"].to_numpy()
+    fwd_ret_30 = df["fwd_return_30s"].to_numpy()
+    fwd_ret_10 = df["fwd_return_10s"].to_numpy()
+    fwd_ret_5 = df["fwd_return_5s"].to_numpy()
+    fwd_ret = fwd_ret_5
+    fwd_shift = 5
 
     # Calculate Information Coefficients (Spearman Rank Correlation)
     ic_imb, p_imb = stats.spearmanr(imb, fwd_ret)
@@ -31,9 +35,22 @@ def evaluate_signals(df):
     avg_long_bps = np.mean(fwd_ret[long_mask]) * 10000 if np.any(long_mask) else 0.0
     avg_short_bps = np.mean(fwd_ret[short_mask]) * 10000 if np.any(short_mask) else 0.0
 
-    print("\n--- Conditional Forward 30s Edge ---")
+    print(f"\n--- Conditional Forward {fwd_shift}s Edge ---")
     print(f"Long  (Imbalance >  0.6) [{np.sum(long_mask):,} bars]: {avg_long_bps:+.2f} bps")
     print(f"Short (Imbalance < -0.6) [{np.sum(short_mask):,} bars]: {avg_short_bps:+.2f} bps")
+
+    # Debugging --------------------------------------------------------------------------------------------------------
+    # Check trade balance distribution
+    print("\nTrade Imbalance")
+    print(df.select([
+        pl.col("trade_imbalance").quantile(q).alias(f"q_{int(q * 100)}")
+        for q in [0.01, 0.05, 0.50, 0.95, 0.99]
+    ]))
+    # verify buy sell volume
+    print(df.select([
+        pl.col("buy_vol").sum().alias("total_buy_vol"),
+        pl.col("sell_vol").sum().alias("total_sell_vol"),
+    ]))
 
 
 def main():
