@@ -53,7 +53,7 @@ def load_mbo_trades(parquet_path: Path) -> pl.DataFrame:
         .select([
             pl.col("ts_event").cast(pl.Datetime("ns")),
             pl.col("side"),
-            (pl.col("price") / 1e9).alias("price"),  # price scaling
+            pl.col("price"),
             pl.col("size"),
         ])
         .sort("ts_event")

@@ -1,5 +1,8 @@
 from src.data_loader import load_mbo_trades, get_or_convert_parquet_files
 from src.signals import generate_micro_bars_and_signals
+from src.labeling import label_momentum_episodes
+from src.visualization import plot_multi_event_momentum_sample
+from src.models import train_momentum_classifier
 import scipy.stats as stats
 import numpy as np
 import polars as pl
@@ -86,6 +89,31 @@ def main():
         (pl.col("ts_event").dt.hour() == 15)
     )
     evaluate_signals(momentum_hours)
+
+    # Identify momentum episodes
+    print("\nLabeling momentum episodes...")
+    df_labeled = label_momentum_episodes(
+        full_dataset,
+        k_baseline=15,
+        z_thresh=2.0,
+        trail_mult=1.5,
+        min_run_bps=4.0,
+        max_horizon=10
+    )
+
+    print("Rendering multi-event audit charts...")
+    # Plots a window containing at least 2 to 3 momentum episodes (wins and stops)
+    plot_multi_event_momentum_sample(
+        df_labeled,
+        min_events=3,
+        max_span_bars=100,  # Max 100 minutes between first and last event
+        pad_bars=15,  # Context bars before/after
+        require_positive_only=False,  # Set to True if you only want successful runners
+    )
+
+    # Train and evaluate model
+    print("\nTraining momentum classifier...")
+    train_momentum_classifier(df_labeled)
 
 
 if __name__ == "__main__":

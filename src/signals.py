@@ -1,5 +1,5 @@
 import polars as pl
-
+import numpy as np
 
 def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
     if trades_df.is_empty():
@@ -33,6 +33,9 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("vol_1s").filter(pl.col("vol_1s") > 0).count().alias("active_seconds"),
         ])
         .with_columns([
+            pl.col("realized_variance").sqrt().alias("realized_vol_1m"),
+            # Parkinson Volatility
+            (((pl.col("high") / pl.col("low")).log().pow(2)) / (4 * np.log(2))).sqrt().alias("parkinson_vol"),
             (pl.col("buy_vol") - pl.col("sell_vol")).alias("net_delta"),
         ])
     )
