@@ -3,12 +3,19 @@ import numpy as np
 
 def label_momentum_episodes(
         df: pl.DataFrame,
-        k_baseline: int = 15,
-        z_thresh: float = 2.0,
+        direction: str = "long",  # "long" or "short"
+        k_baseline: int = 15,  # strictly lagged window of K bars
+        z_thresh: float = 2.0,  # 2 std dev of Z-score of normalized log return
         trail_mult: float = 1.5,
-        min_run_bps: float = 8.0,
+        min_run_bps: float = 4.0,
         max_horizon: int = 10,
 ) -> pl.DataFrame:
+    """
+        Labels path-dependent momentum episodes for either 'long' or 'short' directions.
+    """
+
+    if direction not in ["long", "short"]:
+        raise ValueError("direction must be either 'long' or 'short'")
 
     # Calculate strictly lagged baseline
     df = (
@@ -29,29 +36,48 @@ def label_momentum_episodes(
     std_bases = df["std_base"].to_numpy()
     n = len(df)
     labels = np.zeros(n, dtype=np.int32)
-    mfe_bps = np.zeros(n, dtype=np.float64)
+    mfe_bps = np.zeros(n, dtype=np.float64) # MFE (Maximum Favorable Excursion)
     end_indices = np.full(n, -1, dtype=np.int32)
 
-    # Path-dependent evaluation of momentum episodes
+    # Directional Path-dependent evaluation of momentum episodes
     for t in range(k_baseline + 1, n - max_horizon):
-        if z_scores[t] >= z_thresh:  # Long impulse trigger
-            p_start = closes[t]
-            vol_stop = trail_mult * std_bases[t] * p_start
+        p_start = closes[t]
+        vol_stop = trail_mult * std_bases[t] * p_start
+
+        if direction == "long" and z_scores[t] >= z_thresh:
             peak = p_start
             tau_end = t + max_horizon
 
             for s in range(t + 1, min(t + max_horizon + 1, n)):
                 if closes[s] > peak:
                     peak = closes[s]
-                # Termination check: Trailing pullback from peak
+                # Termination: Pullback from peak
                 if (peak - closes[s]) >= vol_stop:
                     tau_end = s
                     break
 
-            realized_mfe = (peak - p_start) / p_start * 10000
+            realized_mfe = (peak - p_start) / p_start * 10000.0
             mfe_bps[t] = realized_mfe
             end_indices[t] = tau_end
+            if realized_mfe >= min_run_bps:
+                labels[t] = 1
 
+        elif direction == "short" and z_scores[t] <= -z_thresh:
+            trough = p_start
+            tau_end = t + max_horizon
+
+            for s in range(t + 1, min(t + max_horizon + 1, n)):
+                if closes[s] < trough:
+                    trough = closes[s]
+                # Termination: Bounce upward from trough
+                if (closes[s] - trough) >= vol_stop:
+                    tau_end = s
+                    break
+
+            # Favorable excursion in short direction (gain as price falls)
+            realized_mfe = (p_start - trough) / p_start * 10000.0
+            mfe_bps[t] = realized_mfe
+            end_indices[t] = tau_end
             if realized_mfe >= min_run_bps:
                 labels[t] = 1
 
@@ -59,4 +85,5 @@ def label_momentum_episodes(
         pl.Series("target_label", labels),
         pl.Series("target_mfe_bps", mfe_bps),
         pl.Series("target_end_idx", end_indices),
+        pl.lit(direction).alias("momentum_direction"),
     ])

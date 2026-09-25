@@ -41,6 +41,7 @@ def get_or_convert_parquet_files(data_dir: str = "data", max_workers: int = 4) -
 
     return sorted(parquet_files)
 
+
 def load_mbo_trades(parquet_path: Path) -> pl.DataFrame:
     """
     Lazily scans the Parquet file, extracts executions (trades only),
@@ -60,3 +61,28 @@ def load_mbo_trades(parquet_path: Path) -> pl.DataFrame:
     )
     return q.collect()
 
+
+def filter_regular_trading_hours(
+        df: pl.DataFrame, time_col: str = "ts_event"
+) -> pl.DataFrame:
+    """Filters trades or bars strictly to US Regular Trading Hours (09:30:00 to 16:00:00 Eastern).
+
+  Handles daylight saving transitions automatically.
+  """
+    # 1. Ensure UTC timezone awareness
+    if df[time_col].dtype.time_zone is None:
+        ts_expr = pl.col(time_col).dt.replace_time_zone("UTC")
+    else:
+        ts_expr = pl.col(time_col)
+
+    # 2. Convert to US/Eastern and filter by time of day
+    return (
+        df.with_columns(
+            ts_expr.dt.convert_time_zone("America/New_York").alias("ts_ny")
+        )
+        .filter(
+            (pl.col("ts_ny").dt.time() >= pl.time(9, 30, 0))
+            & (pl.col("ts_ny").dt.time() <= pl.time(16, 0, 0))
+        )
+        .drop("ts_ny")
+    )

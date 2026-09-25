@@ -1,4 +1,4 @@
-from src.data_loader import load_mbo_trades, get_or_convert_parquet_files
+from src.data_loader import load_mbo_trades, get_or_convert_parquet_files, filter_regular_trading_hours
 from src.signals import generate_micro_bars_and_signals
 from src.labeling import label_momentum_episodes
 from src.visualization import plot_multi_event_momentum_sample
@@ -73,7 +73,9 @@ def main():
     # Extract signals per day
     for path in parquet_paths:
         trades = load_mbo_trades(path)
-        day_signals = generate_micro_bars_and_signals(trades)
+        # Filter raw trades to 09:30 - 16:00 US Eastern
+        trades_rth = filter_regular_trading_hours(trades, time_col="ts_event")
+        day_signals = generate_micro_bars_and_signals(trades_rth)
         if len(day_signals) > 0:
             daily_feature_dfs.append(day_signals)
             print(f"  {path.name}: {len(day_signals):,} bars")
@@ -90,31 +92,54 @@ def main():
     )
     evaluate_signals(momentum_hours)
 
-    # Identify momentum episodes
-    print("\nLabeling momentum episodes...")
-    df_labeled = label_momentum_episodes(
+    # -------------------------------------------------------------
+    # RUN LONG MOMENTUM PIPELINE
+    # -------------------------------------------------------------
+    print("\nLabeling long momentum episodes...")
+    df_long = label_momentum_episodes(
         full_dataset,
+        direction="long",
         k_baseline=15,
         z_thresh=2.0,
         trail_mult=1.5,
-        min_run_bps=4.0,
+        min_run_bps=8.0,
         max_horizon=10
     )
+    clf_long = train_momentum_classifier(df_long, direction="long")
+
+    # -------------------------------------------------------------
+    # RUN SHORT MOMENTUM PIPELINE
+    # -------------------------------------------------------------
+    print("\nLabeling short momentum episodes...")
+    df_short = label_momentum_episodes(
+        full_dataset,
+        direction="short",
+        k_baseline=15,
+        z_thresh=2.0,
+        trail_mult=1.5,
+        min_run_bps=8.0,
+        max_horizon=10
+    )
+    clf_short = train_momentum_classifier(df_long, direction="short")
 
     print("Rendering multi-event audit charts...")
     # Plots a window containing at least 2 to 3 momentum episodes (wins and stops)
     plot_multi_event_momentum_sample(
-        df_labeled,
+        df_long,
+        direction="long",
         min_events=3,
         max_span_bars=100,  # Max 100 minutes between first and last event
         pad_bars=15,  # Context bars before/after
         require_positive_only=False,  # Set to True if you only want successful runners
     )
-
-    # Train and evaluate model
-    print("\nTraining momentum classifier...")
-    train_momentum_classifier(df_labeled)
-
+    plot_multi_event_momentum_sample(
+        df_short,
+        direction="short",
+        min_events=3,
+        max_span_bars=100,  # Max 100 minutes between first and last event
+        pad_bars=15,  # Context bars before/after
+        require_positive_only=False,  # Set to True if you only want successful runners
+    )
 
 if __name__ == "__main__":
     main()

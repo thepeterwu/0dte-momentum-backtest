@@ -5,6 +5,7 @@ import polars as pl
 
 def plot_multi_event_momentum_sample(
         df: pl.DataFrame,
+        direction: str = "long",
         min_events: int = 2,
         max_span_bars: int = 150,
         pad_bars: int = 20,
@@ -160,6 +161,11 @@ def plot_multi_event_momentum_sample(
     ]
     stagger_y_tiers = [0.96, 0.88, 0.80]
 
+    # Detect direction from dataframe
+    is_short = (df["momentum_direction"][0] == "short") if "momentum_direction" in df.columns else False
+    marker_symbol = "triangle-down" if is_short else "triangle-up"
+
+
     for k, ev_start in enumerate(window_events):
         ev_end = int(
             max(ends_arr[ev_start], ev_start + 1)
@@ -179,6 +185,14 @@ def plot_multi_event_momentum_sample(
             "rgba(0, 230, 118, 0.12)" if is_winner else "rgba(255, 82, 82, 0.12)"
         )
 
+        # Anchor marker above the high for short trades, below low for long trades
+        if is_short:
+            y_marker = sub_df.iloc[rel_start]["high"] + 0.05
+            text_pos = "top center"
+        else:
+            y_marker = sub_df.iloc[rel_start]["low"] - 0.05
+            text_pos = "bottom center"
+
         # Shaded momentum zone
         fig.add_vrect(
             x0=rel_start - 0.4,
@@ -194,12 +208,12 @@ def plot_multi_event_momentum_sample(
         fig.add_trace(
             go.Scatter(
                 x=[rel_start],
-                y=[sub_df.iloc[rel_start]["low"] * 0.9997],
+                y=[y_marker],
                 mode="markers+text",
-                marker=dict(symbol="triangle-up", size=8, color=color),
+                marker=dict(symbol=marker_symbol, size=7, color=color),
                 text=[f"#{k + 1}<br>Z={z_score:.1f}"],
-                textposition="bottom center",
-                textfont=dict(size=8, color="#cfd8dc"),
+                textposition=text_pos,
+                textfont=dict(size=7.5, color="#cfd8dc"),
                 showlegend=False,
             )
         )
@@ -229,8 +243,8 @@ def plot_multi_event_momentum_sample(
     fig.update_layout(
         title=dict(
             text=(
-                "Multi-Momentum Window Audit (AEST) — "
-                f"{len(window_events)} Events Detected"
+                "Momentum Windows (AEST) — "
+                f"{len(window_events)} Events Detected : {direction}"
             ),
             font=dict(size=12, color="#eceff1"),
             x=0.01,

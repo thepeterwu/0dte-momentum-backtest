@@ -34,7 +34,7 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
         ])
         .with_columns([
             pl.col("realized_variance").sqrt().alias("realized_vol_1m"),
-            # Parkinson Volatility
+            # Parkinson Volatility - more robust measure of volatility compared to volatility derived from closing price
             (((pl.col("high") / pl.col("low")).log().pow(2)) / (4 * np.log(2))).sqrt().alias("parkinson_vol"),
             (pl.col("buy_vol") - pl.col("sell_vol")).alias("net_delta"),
         ])
