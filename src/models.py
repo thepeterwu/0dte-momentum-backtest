@@ -30,12 +30,20 @@ def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, cand
 
 def train_momentum_classifier(df: pl.DataFrame, direction: str = "long"):
     feature_cols = [
+        # Intra-bar Microstructure & Volatility
         "realized_vol_1m",
         "parkinson_vol",
         "active_seconds",
+
+        # Order Flow & Price Velocity
         "persistent_delta_3m",
+        "cum_ret_3m",  # Captures ongoing cascades past single-bar variance spikes
+
+        # Structural Location & Context
         "dist_vwap_bps",
         "z_score_20m_prior",
+        "dist_lowest_15m_bps",  # Critical for short breakdowns: <= 0
+        "dist_highest_15m_bps",  # Critical for long breakouts: >= 0
     ]
 
     # Filter candidate impulse bars according to direction
@@ -55,7 +63,7 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long"):
     X = candidate_bars[feature_cols]
     y = candidate_bars["target_label"]
 
-    # Chronological 75/25 split
+    # Chronological 75/25 split (Upgrade to rolling walk-forward validation with larger datasets)
     split_idx = int(len(candidate_bars) * 0.75)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -87,14 +95,16 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long"):
 
     clf = lgb.LGBMClassifier(
         n_estimators=100,
-        learning_rate=0.03,
-        max_depth=3,
-        num_leaves=7,
-        min_child_samples=15,
+        learning_rate=0.03,     # set to 0.02 for larger datasets
+        max_depth=3,            # set to 4, increased depth to capture (volatility x location) interactions
+        num_leaves=7,           # set to 15 for larger datasets, 2^depth - 1 capacity
+        min_child_samples=15,   # set to 30 to stabilize splits on larger sample
         scale_pos_weight=pos_weight,
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=42,
+        verbosity=-1,  # -1 = Fatal only (silences Info and Warnings)
+        force_col_wise=True,  # Removes the threading evaluation overhead prompt
     )
 
     clf.fit(X_train, y_train)

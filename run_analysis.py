@@ -101,9 +101,10 @@ def main():
         direction="long",
         k_baseline=15,
         z_thresh=2.0,
-        trail_mult=1.5,
-        min_run_bps=8.0,
-        max_horizon=10
+        trail_mult=2.0,
+        min_stop_bps=5.0,
+        min_run_bps=5.0,
+        max_horizon=15
     )
     clf_long = train_momentum_classifier(df_long, direction="long")
 
@@ -115,12 +116,13 @@ def main():
         full_dataset,
         direction="short",
         k_baseline=15,
-        z_thresh=2.0,
-        trail_mult=1.5,
-        min_run_bps=8.0,
-        max_horizon=10
+        z_thresh=1.8,
+        trail_mult=2.0,
+        min_stop_bps=4.0,
+        min_run_bps=5.0,
+        max_horizon=15
     )
-    clf_short = train_momentum_classifier(df_long, direction="short")
+    clf_short = train_momentum_classifier(df_short, direction="short")
 
     print("Rendering multi-event audit charts...")
     # Plots a window containing at least 2 to 3 momentum episodes (wins and stops)

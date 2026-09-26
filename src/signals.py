@@ -15,7 +15,7 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("size").filter(pl.col("side") == "A").sum().fill_null(0).cast(pl.Float64).alias("sell_vol_1s"),
         ])
         .with_columns([
-            (pl.col("close_1s") / pl.col("close_1s").shift(1)).log().fill_null(0).alias("log_ret_1s")
+            (pl.col("close_1s") / pl.col("close_1s").shift(1)).log().fill_null(0).alias("log_ret_1s"),
         ])
     )
 
@@ -33,11 +33,20 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             pl.col("vol_1s").filter(pl.col("vol_1s") > 0).count().alias("active_seconds"),
         ])
         .with_columns([
+            (pl.col("ts_event").dt.truncate("1d").alias("trade_date")),  # Extract trading session date
             pl.col("realized_variance").sqrt().alias("realized_vol_1m"),
             # Parkinson Volatility - more robust measure of volatility compared to volatility derived from closing price
             (((pl.col("high") / pl.col("low")).log().pow(2)) / (4 * np.log(2))).sqrt().alias("parkinson_vol"),
             (pl.col("buy_vol") - pl.col("sell_vol")).alias("net_delta"),
         ])
+        # Zero out returns when bars cross between days
+        .with_columns(
+            pl.when(pl.col("trade_date") != pl.col("trade_date").shift(1))  # First bar of day
+            .then(0.0)
+            .otherwise((pl.col("close") / pl.col("close").shift(1)).log())
+            .fill_null(0.0)
+            .alias("ret_1m")
+        )
     )
 
     # Calculate VWAP directly from raw trades in a separate 1-minute aggregation
@@ -89,6 +98,21 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
                     (pl.col("dist_vwap_bps") < -2.0) &
                     (pl.col("close") < pl.col("open"))
             ).alias("confirmed_short_breakout"),
+        ])
+        .with_columns([
+            # 3-minute cumulative return
+            (pl.col("close") / pl.col("close").shift(3) - 1.0).alias("cum_ret_3m"),
+            # Donchian breakdown / breakout (distance to 15m low / high)
+            (
+                    (pl.col("close") - pl.col("low").rolling_min(15).shift(1))
+                    / (pl.col("close") + 1e-6)
+                    * 10000
+            ).alias("dist_lowest_15m_bps"),
+            (
+                    (pl.col("close") - pl.col("high").rolling_max(15).shift(1))
+                    / (pl.col("close") + 1e-6)
+                    * 10000
+            ).alias("dist_highest_15m_bps"),
         ])
         .drop_nulls()
     )
