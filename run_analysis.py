@@ -80,7 +80,7 @@ def main():
             daily_feature_dfs.append(day_signals)
             print(f"  {path.name}: {len(day_signals):,} bars")
 
-    # Stack all 23 days
+    # Stack all days
     full_dataset = pl.concat(daily_feature_dfs)
     print(f"\nAll days processed. Total aggregated bars: {len(full_dataset):,}")
 
@@ -106,7 +106,7 @@ def main():
         min_run_bps=5.0,
         max_horizon=15
     )
-    clf_long = train_momentum_classifier(df_long, direction="long")
+    clf_long = train_momentum_classifier(df_long, direction="long", cooldown_bars=12)
 
     # -------------------------------------------------------------
     # RUN SHORT MOMENTUM PIPELINE
@@ -118,11 +118,11 @@ def main():
         k_baseline=15,
         z_thresh=1.8,
         trail_mult=2.0,
-        min_stop_bps=4.0,
+        min_stop_bps=4.5,
         min_run_bps=5.0,
         max_horizon=15
     )
-    clf_short = train_momentum_classifier(df_short, direction="short")
+    clf_short = train_momentum_classifier(df_short, direction="short", cooldown_bars=12)
 
     print("Rendering multi-event audit charts...")
     # Plots a window containing at least 2 to 3 momentum episodes (wins and stops)

@@ -135,6 +135,8 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             # Forward Targets: 5-minute (5 bars) and 15-minute (15 bars) returns
             ((pl.col("close").shift(-5) - pl.col("close")) / pl.col("close")).alias("fwd_return_5m"),
             ((pl.col("close").shift(-15) - pl.col("close")) / pl.col("close")).alias("fwd_return_15m"),
+            # Measures distance from the day's opening price (net session trend)
+            ((pl.col("close") - pl.col("open").first().over("trade_date")) / pl.col("close") * 10000).alias("session_drift_bps"),
         ])
         .with_columns([
             # Normalized Persistent Delta Flow over 3 minutes [-1.0, 1.0]
