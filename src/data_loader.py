@@ -8,38 +8,46 @@ def _convert_single_file(dbn_file: Path) -> Path:
     base_name = dbn_file.name.replace(".dbn.zst", "")
     parquet_file = dbn_file.parent / f"{base_name}.parquet"
 
-    if not parquet_file.exists():
-        print(f"Converting {dbn_file.name}...")
-        store = db.DBNStore.from_file(dbn_file)
-        store.to_parquet(parquet_file)
+    print(f"Converting {dbn_file.name} -> {parquet_file.name}...")
+    store = db.DBNStore.from_file(dbn_file)
+    store.to_parquet(parquet_file)
     return parquet_file
 
 
 def get_or_convert_parquet_files(data_dir: str = "data", max_workers: int = 4) -> list[Path]:
     """
-    Returns existing .parquet files. If none are found, searches for .dbn.zst
-    files and converts them in parallel before returning the list.
+    Checks for missing .parquet files corresponding to available .dbn.zst files,
+    converts missing ones in parallel, and returns all available .parquet files.
     """
     data_path = Path(data_dir)
-
-    # 1. Check if Parquet files already exist (e.g. copied from another machine)
-    parquet_files = sorted(data_path.glob("*.mbo.parquet"))
-    if parquet_files:
-        print(f"Found {len(parquet_files)} existing Parquet files. Skipping conversion.")
-        return parquet_files
-
-    # 2. If no Parquet files, fall back to discovering and converting DBN files
     dbn_files = sorted(data_path.glob("*.mbo.dbn.zst"))
-    if not dbn_files:
+
+    # Identify which DBN files actually need conversion
+    dbn_to_convert = []
+    for dbn_file in dbn_files:
+        base_name = dbn_file.name.replace(".dbn.zst", "")
+        parquet_file = data_path / f"{base_name}.parquet"
+        if not parquet_file.exists():
+            dbn_to_convert.append(dbn_file)
+
+    # Convert only the missing files
+    if dbn_to_convert:
+        print(f"Found {len(dbn_to_convert)} new DBN file(s) to convert (workers={max_workers})...")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(_convert_single_file, dbn_to_convert))
+    else:
+        if dbn_files:
+            print("All DBN files already have matching Parquet files.")
+
+    # Collect all existing and newly converted Parquet files
+    parquet_files = sorted(data_path.glob("*.mbo.parquet"))
+    if not parquet_files:
         raise FileNotFoundError(
             f"No processed '*.mbo.parquet' or raw '*.mbo.dbn.zst' files found in '{data_dir}'"
         )
 
-    print(f"Found {len(dbn_files)} DBN files. Converting in parallel (workers={max_workers})...")
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        parquet_files = list(executor.map(_convert_single_file, dbn_files))
-
-    return sorted(parquet_files)
+    print(f"Ready with {len(parquet_files)} total Parquet files.")
+    return parquet_files
 
 
 def load_mbo_trades(parquet_path: Path) -> pl.DataFrame:
