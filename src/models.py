@@ -12,13 +12,15 @@ def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, cand
     base_rate = np.mean(y_test) * 100
     print(f"Test Sample Size: {len(y_test)} bars | Unconditional Win Rate: {base_rate:.1f}%\n")
 
+    mfe_arr = candidate_test_df["target_mfe_bps"].to_numpy()
+
     for thresh in [0.20, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]:
         mask = preds_prob >= thresh
         trades = int(np.sum(mask))
 
         if trades > 0:
             win_rate = np.mean(y_test[mask] == 1) * 100
-            avg_mfe = candidate_test_df.loc[mask, "target_mfe_bps"].mean()
+            avg_mfe = float(np.mean(mfe_arr[mask]))
             print(
                 f"Cutoff >= {thresh:.2f} | Trades: {trades:3d} ({trades / len(y_test) * 100:4.1f}%) | "
                 f"Win Rate: {win_rate:5.1f}% | Avg Expansion: +{avg_mfe / 100:.2f}% (+{avg_mfe:.1f} bps)"
@@ -30,34 +32,49 @@ def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, cand
 
 def train_momentum_classifier(df: pl.DataFrame, direction: str = "long"):
     feature_cols = [
-        # Intra-bar Microstructure & Volatility
+        # Macro volatility & structure (15-min strategy)
         "realized_vol_1m",
         "parkinson_vol",
         "active_seconds",
-
         # Order Flow & Price Velocity
         "persistent_delta_3m",
-        "cum_ret_3m",  # Captures ongoing cascades past single-bar variance spikes
-
+        "cum_ret_3m",                       # Captures ongoing cascades past single-bar variance spikes
         # Structural Location & Context
         "dist_vwap_bps",
         "z_score_20m_prior",
-        "dist_lowest_15m_bps",  # Critical for short breakdowns: <= 0
-        "dist_highest_15m_bps",  # Critical for long breakouts: >= 0
+        "dist_lowest_15m_bps",              # Critical for short breakdowns: <= 0
+        "dist_highest_15m_bps",             # Critical for long breakouts: >= 0
+
+        # Sub-minute burst & coiling features (Calibrated 30s/5s strategy)
+        "min_intra_compression_ratio",      # Identifies if price coiled in the last 30s
+        "max_intra_z_burst_long",           # Captures explosive upward micro-moves
+        "min_intra_z_burst_short",          # Captures explosive downward micro-moves
+        "max_intra_box_expansion_long",     # Distance escaped above 30s consolidation box
+        "max_intra_box_expansion_short",    # Distance escaped below 30s consolidation box
+        "exit_flow_thrust_5s",              # Order book taker aggression at bar close
     ]
 
     # Filter candidate impulse bars according to direction
     if direction == "long":
-        candidate_bars = df.filter(pl.col("z_impulse") >= 1.5).to_pandas()
+        candidate_pl = df.filter(pl.col("z_impulse") >= 1.5)
     else:
-        candidate_bars = df.filter(pl.col("z_impulse") <= -1.5).to_pandas()
+        candidate_pl = df.filter(pl.col("z_impulse") <= -1.5)
 
-    if len(candidate_bars) == 0:
-        print(f"No {direction} impulse candidate bars found.")
-    elif len(candidate_bars) < 20:
+    if len(candidate_pl) < 20:
         print(
             f"[{direction.upper()}] Insufficient candidate bars"
-            f" ({len(candidate_bars)}). Adjust threshold or ingest more days."
+            f" ({len(candidate_pl)}). Ingest more days or relax threshold."
+        )
+        return None
+
+    candidate_bars = candidate_pl.to_pandas()
+
+    # Guard against missing feature columns
+    missing_cols = [c for c in feature_cols if c not in candidate_bars.columns]
+    if missing_cols:
+        raise KeyError(
+            f"Missing engineered features in DataFrame: {missing_cols}. "
+            "Ensure signals.py has been run with updated features."
         )
 
     X = candidate_bars[feature_cols]
@@ -92,13 +109,15 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long"):
 
     # Handle class weights safely
     pos_weight = n_neg_train / max(n_pos_train, 1)
+    # Dynamic child samples: adapts cleanly from 23 days to 80 days
+    min_child = max(10, min(30, int(len(X_train) * 0.05)))
 
     clf = lgb.LGBMClassifier(
         n_estimators=100,
-        learning_rate=0.03,     # set to 0.02 for larger datasets
-        max_depth=3,            # set to 4, increased depth to capture (volatility x location) interactions
-        num_leaves=7,           # set to 15 for larger datasets, 2^depth - 1 capacity
-        min_child_samples=15,   # set to 30 to stabilize splits on larger sample
+        learning_rate=0.02,     # set to 0.02 for larger datasets
+        max_depth=4,            # set to 4, increased depth to capture (volatility x location) interactions
+        num_leaves=15,           # set to 15 for larger datasets, 2^depth - 1 capacity
+        min_child_samples=min_child,   # dynamically scaled to stabilize splits on larger sample
         scale_pos_weight=pos_weight,
         subsample=0.8,
         colsample_bytree=0.8,

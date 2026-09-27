@@ -8,3 +8,5 @@ Mac/Linux: source .venv/bin/activate
 
 Install Dependencies
 pip install -r requirements.txt
+
+# Momentum  
