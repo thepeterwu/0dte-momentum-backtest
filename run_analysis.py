@@ -99,6 +99,7 @@ def main():
     df_long = label_momentum_episodes(
         full_dataset,
         direction="long",
+        vol_method="parkinson",
         k_baseline=15,
         z_thresh=2.0,
         trail_mult=2.0,
@@ -115,6 +116,7 @@ def main():
     df_short = label_momentum_episodes(
         full_dataset,
         direction="short",
+        vol_method = "parkinson",
         k_baseline=15,
         z_thresh=1.8,
         trail_mult=2.0,
