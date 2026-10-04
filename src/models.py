@@ -30,46 +30,46 @@ def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, cand
     print("=" * 70)
 
 
-def filter_non_overlapping_candidates(
-        candidate_df: pl.DataFrame, cooldown_bars: int = 12
-) -> pl.DataFrame:
-    """Suppresses overlapping impulse triggers. Once a candidate triggers, no other
-
-    candidate can trigger within `cooldown_bars` (minutes) on the same trading
-    day.
-    """
-    if candidate_df.is_empty():
-        return candidate_df
-
-    # Compute exact minute-of-day integer (09:30 ET -> 9*60 + 30 = 570)
-    # This makes the cooldown immune to gaps or missing bars.
-    df_with_time = candidate_df.with_columns(
-        (
-                pl.col("ts_event").dt.hour().cast(pl.Int32) * 60 + pl.col("ts_event").dt.minute().cast(pl.Int32)
-        ).alias("minute_of_day")
-    )
-
-    trade_dates = df_with_time["trade_date"].to_numpy()
-    minute_indices = df_with_time["minute_of_day"].to_numpy()
-
-    # Fast single-pass loop to isolate non-overlapping setup entries
-    keep_mask = np.zeros(len(df_with_time), dtype=bool)
-    last_accepted_minute = -9999
-    last_date = None
-
-    for i, (date, minute_val) in enumerate(zip(trade_dates, minute_indices)):
-        if date != last_date:
-            # Fresh trading session: always accept the first valid trigger of the day
-            keep_mask[i] = True
-            last_accepted_minute = minute_val
-            last_date = date
-        elif minute_val >= (last_accepted_minute + cooldown_bars):
-            # Cooldown has elapsed within the same trading session
-            keep_mask[i] = True
-            last_accepted_minute = minute_val
-
-    # Return filtered DataFrame and drop the temporary helper column
-    return df_with_time.filter(pl.Series(keep_mask)).drop("minute_of_day")
+# def filter_non_overlapping_candidates(
+#         candidate_df: pl.DataFrame, cooldown_bars: int = 12
+# ) -> pl.DataFrame:
+#     """Suppresses overlapping impulse triggers. Once a candidate triggers, no other
+#
+#     candidate can trigger within `cooldown_bars` (minutes) on the same trading
+#     day.
+#     """
+#     if candidate_df.is_empty():
+#         return candidate_df
+#
+#     # Compute exact minute-of-day integer (09:30 ET -> 9*60 + 30 = 570)
+#     # This makes the cooldown immune to gaps or missing bars.
+#     df_with_time = candidate_df.with_columns(
+#         (
+#                 pl.col("ts_event").dt.hour().cast(pl.Int32) * 60 + pl.col("ts_event").dt.minute().cast(pl.Int32)
+#         ).alias("minute_of_day")
+#     )
+#
+#     trade_dates = df_with_time["trade_date"].to_numpy()
+#     minute_indices = df_with_time["minute_of_day"].to_numpy()
+#
+#     # Fast single-pass loop to isolate non-overlapping setup entries
+#     keep_mask = np.zeros(len(df_with_time), dtype=bool)
+#     last_accepted_minute = -9999
+#     last_date = None
+#
+#     for i, (date, minute_val) in enumerate(zip(trade_dates, minute_indices)):
+#         if date != last_date:
+#             # Fresh trading session: always accept the first valid trigger of the day
+#             keep_mask[i] = True
+#             last_accepted_minute = minute_val
+#             last_date = date
+#         elif minute_val >= (last_accepted_minute + cooldown_bars):
+#             # Cooldown has elapsed within the same trading session
+#             keep_mask[i] = True
+#             last_accepted_minute = minute_val
+#
+#     # Return filtered DataFrame and drop the temporary helper column
+#     return df_with_time.filter(pl.Series(keep_mask)).drop("minute_of_day")
 
 
 def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldown_bars: int = 12):
@@ -108,9 +108,10 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldow
                                    )
 
     # Apply the non-overlapping candidate filter
-    candidate_pl = filter_non_overlapping_candidates(
-        raw_candidates, cooldown_bars=cooldown_bars
-    )
+    candidate_pl = raw_candidates.filter(pl.col("is_candidate"))
+    # candidate_pl = filter_non_overlapping_candidates(
+    #     raw_candidates, cooldown_bars=cooldown_bars
+    # )
     print(f"\n[{direction.upper()}] Candidate Overlap Filter (Cooldown = {cooldown_bars}m):")
     print(
         f"  Raw triggers: {len(raw_candidates):,} -> Independent events:"

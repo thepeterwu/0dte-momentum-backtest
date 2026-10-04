@@ -5,32 +5,23 @@ import numpy as np
 def label_momentum_episodes(
         df: pl.DataFrame,
         direction: str = "long",  # "long" or "short"
-        vol_method: str = "parkinson",  # "parkinson" or "close_to_close"
         k_baseline: int = 15,  # strictly lagged window of K bars
         z_thresh: float = 2.0,  # Z-score hurdle
         trail_mult: float = 1.5,  # trailing stop multiplier
         min_stop_bps: float = 5.0,  # Minimum stop floor in basis points
         min_run_bps: float = 5.0,  # Target expansion milestone in basis points
         max_horizon: int = 15,
+        cooldown_bars: int = 12
 ) -> pl.DataFrame:
     """Labels path-dependent momentum episodes using Parkinson or close-to-close volatility."""
     if direction not in ["long", "short"]:
         raise ValueError("direction must be either 'long' or 'short'")
-    if vol_method not in ["parkinson", "close_to_close"]:
-        raise ValueError(
-            "vol_method must be either 'parkinson' or 'close_to_close'"
-        )
 
     # Compute strictly lagged baselines within each day
     df = (
         df.with_columns([
             # Strictly lagged 1-minute return within session
             pl.col("ret_1m").shift(1).over("trade_date").alias("ret_1m_lagged"),
-            # Strictly lagged Parkinson volatility within session
-            pl.col("parkinson_vol")
-            .shift(1)
-            .over("trade_date")
-            .alias("parkinson_vol_lagged"),
         ])
         .with_columns([
             # Mean return drift (identical for both methods)
@@ -49,37 +40,22 @@ def label_momentum_episodes(
                 .fill_null(0.0003)
                 .alias("std_dev_base_c2c")
             ),
-            # Parkinson continuous diffusion baseline
-            (
-                pl.col("parkinson_vol_lagged")
-                .rolling_mean(window_size=k_baseline, min_samples=3)
-                .over("trade_date")
-                .fill_null(pl.col("parkinson_vol"))
-                .alias("std_dev_base_park")
-            ),
         ])
         .with_columns([
             (
                     (pl.col("ret_1m") - pl.col("mu_base"))
                     / (pl.col("std_dev_base_c2c") + 1e-6)
             ).alias("z_impulse_c2c"),
-            (
-                    (pl.col("ret_1m") - pl.col("mu_base"))
-                    / (pl.col("std_dev_base_park") + 1e-6)
-            ).alias("z_impulse_park"),
         ])
-        .drop(["ret_1m_lagged", "parkinson_vol_lagged"])
+        .drop(["ret_1m_lagged"])
     )
 
-    # Select active Z-score and baseline series
-    if vol_method == "parkinson":
-        active_z = df["z_impulse_park"].to_numpy()
-        active_std = df["std_dev_base_park"].to_numpy()
-        active_impulse_col = "z_impulse_park"
-    else:
-        active_z = df["z_impulse_c2c"].to_numpy()
-        active_std = df["std_dev_base_c2c"].to_numpy()
-        active_impulse_col = "z_impulse_c2c"
+    active_z = df["z_impulse_c2c"].to_numpy()
+    active_std = df["std_dev_base_c2c"].to_numpy()
+    active_impulse_col = "z_impulse_c2c"
+    box_exp_short = df["max_intra_box_expansion_short"].to_numpy()
+    thrust_5s = df["exit_flow_thrust_5s"].to_numpy()
+    dist_low_15m = df["dist_lowest_15m_bps"].to_numpy()
 
     closes = df["close"].to_numpy()
     highs = df["high"].to_numpy()
@@ -90,6 +66,7 @@ def label_momentum_episodes(
     labels = np.zeros(n, dtype=np.int32)
     mfe_bps = np.zeros(n, dtype=np.float64)
     end_indices = np.full(n, -1, dtype=np.int32)
+    is_candidate = np.zeros(n, dtype=bool)
 
     # Pre-calculate day boundary indices for hard session stops
     day_changed = trade_dates[1:] != trade_dates[:-1]
@@ -110,9 +87,11 @@ def label_momentum_episodes(
         )
 
     # Path-dependent evaluation
-    for t in range(k_baseline + 1, n - max_horizon):
+    t = k_baseline + 1
+    while t < n - max_horizon:
         p_start = closes[t]
         if p_start <= 0.0:
+            t += 1
             continue
 
         # Stop distance in price terms
@@ -124,9 +103,13 @@ def label_momentum_episodes(
         tau_max = min(t + max_horizon, intraday_limit)
 
         if tau_max <= t:
+            t += 1
             continue
 
+        triggered = False
+
         if direction == "long" and active_z[t] >= z_thresh:
+            is_candidate[t] = True
             # Peak starts at entry price, not entry candle's high
             peak = p_start
             tau_end = tau_max
@@ -145,24 +128,39 @@ def label_momentum_episodes(
             if realized_mfe >= min_run_bps:
                 labels[t] = 1
 
-        elif direction == "short" and active_z[t] <= -z_thresh:
-            # Trough starts at entry price, not entry candle's low
-            trough = p_start
-            tau_end = tau_max
+            triggered = True
+            t = max(tau_end + 1, t + cooldown_bars)
 
-            for s in range(t + 1, tau_max + 1):
-                if lows[s] < trough:
-                    trough = lows[s]
-                # Trailing bounce check against current bar's high
-                if (highs[s] - trough) >= vol_stop:
-                    tau_end = s
-                    break
+        elif direction == "short":
+            is_short_impulse = active_z[t] <= -z_thresh
+            is_box_break = box_exp_short[t] > 0.50
+            is_absorption_trap = (thrust_5s[t] < -0.30) and (dist_low_15m[t] > 0.0)
 
-            realized_mfe = (p_start - trough) / p_start * 10000.0
-            mfe_bps[t] = realized_mfe
-            end_indices[t] = tau_end
-            if realized_mfe >= min_run_bps:
-                labels[t] = 1
+            if is_short_impulse and is_box_break and (not is_absorption_trap):
+                is_candidate[t] = True
+                # Trough starts at entry price, not entry candle's low
+                trough = p_start
+                tau_end = tau_max
+
+                for s in range(t + 1, tau_max + 1):
+                    if lows[s] < trough:
+                        trough = lows[s]
+                    # Trailing bounce check against current bar's high
+                    if (highs[s] - trough) >= vol_stop:
+                        tau_end = s
+                        break
+
+                realized_mfe = (p_start - trough) / p_start * 10000.0
+                mfe_bps[t] = realized_mfe
+                end_indices[t] = tau_end
+                if realized_mfe >= min_run_bps:
+                    labels[t] = 1
+
+                triggered = True
+                t = max(tau_end + 1, t + cooldown_bars)
+
+        if not triggered:
+            t += 1
 
     # Alias active Z-score to 'z_impulse' for downstream compatibility
     return df.with_columns([
@@ -170,5 +168,6 @@ def label_momentum_episodes(
         pl.Series("target_label", labels),
         pl.Series("target_mfe_bps", mfe_bps),
         pl.Series("target_end_idx", end_indices),
+        pl.Series("is_candidate", is_candidate),
         pl.lit(direction).alias("momentum_direction"),
     ])
