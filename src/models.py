@@ -3,19 +3,36 @@ import polars as pl
 import numpy as np
 from sklearn.metrics import classification_report, roc_auc_score, precision_recall_curve
 
+
 #   TODO: Implement Max drawdown
 #       : Add walk forward testing
 
 
-def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, candidate_test_df, direction: str = "long"):
-    print("\n" + "=" * 70)
-    print(f"   {direction.upper()} MOMENTUM PERFORMANCE ACROSS PROBABILITY THRESHOLDS   ")
-    print("=" * 70)
+def evaluate_trading_thresholds(
+        y_test: np.ndarray,
+        preds_prob: np.ndarray,
+        candidate_test_df,
+        direction: str = "long",
+):
+    print("\n" + "=" * 88)
+    print(
+        f"   {direction.upper()} MOMENTUM PERFORMANCE ACROSS PROBABILITY"
+        " THRESHOLDS   "
+    )
+    print("=" * 88)
 
     base_rate = np.mean(y_test) * 100
-    print(f"Test Sample Size: {len(y_test)} bars | Unconditional Win Rate: {base_rate:.1f}%\n")
+    print(
+        f"Test Sample Size: {len(y_test)} bars | Unconditional Win Rate:"
+        f" {base_rate:.1f}%\n"
+    )
 
     mfe_arr = candidate_test_df["target_mfe_bps"].to_numpy()
+    pnl_arr = (
+        candidate_test_df["target_realized_pnl_bps"].to_numpy()
+        if "target_realized_pnl_bps" in candidate_test_df.columns
+        else np.zeros(len(candidate_test_df))
+    )
 
     for thresh in [0.20, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]:
         mask = preds_prob >= thresh
@@ -23,56 +40,17 @@ def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, cand
 
         if trades > 0:
             win_rate = np.mean(y_test[mask] == 1) * 100
+            avg_pnl = float(np.mean(pnl_arr[mask]))
             avg_mfe = float(np.mean(mfe_arr[mask]))
             print(
                 f"Cutoff >= {thresh:.2f} | Trades: {trades:3d} ({trades / len(y_test) * 100:4.1f}%) | "
-                f"Win Rate: {win_rate:5.1f}% | Avg Expansion: +{avg_mfe / 100:.2f}% (+{avg_mfe:.1f} bps)"
+                f"Win Rate: {win_rate:5.1f}% | "
+                f"Realized PnL: {avg_pnl / 100:+.2f}% ({avg_pnl:+.1f} bps) | "
+                f"Avg MFE: +{avg_mfe / 100:.2f}% (+{avg_mfe:.1f} bps)"
             )
         else:
             print(f"Cutoff >= {thresh:.2f} | Trades:   0")
-    print("=" * 70)
-
-
-# def filter_non_overlapping_candidates(
-#         candidate_df: pl.DataFrame, cooldown_bars: int = 12
-# ) -> pl.DataFrame:
-#     """Suppresses overlapping impulse triggers. Once a candidate triggers, no other
-#
-#     candidate can trigger within `cooldown_bars` (minutes) on the same trading
-#     day.
-#     """
-#     if candidate_df.is_empty():
-#         return candidate_df
-#
-#     # Compute exact minute-of-day integer (09:30 ET -> 9*60 + 30 = 570)
-#     # This makes the cooldown immune to gaps or missing bars.
-#     df_with_time = candidate_df.with_columns(
-#         (
-#                 pl.col("ts_event").dt.hour().cast(pl.Int32) * 60 + pl.col("ts_event").dt.minute().cast(pl.Int32)
-#         ).alias("minute_of_day")
-#     )
-#
-#     trade_dates = df_with_time["trade_date"].to_numpy()
-#     minute_indices = df_with_time["minute_of_day"].to_numpy()
-#
-#     # Fast single-pass loop to isolate non-overlapping setup entries
-#     keep_mask = np.zeros(len(df_with_time), dtype=bool)
-#     last_accepted_minute = -9999
-#     last_date = None
-#
-#     for i, (date, minute_val) in enumerate(zip(trade_dates, minute_indices)):
-#         if date != last_date:
-#             # Fresh trading session: always accept the first valid trigger of the day
-#             keep_mask[i] = True
-#             last_accepted_minute = minute_val
-#             last_date = date
-#         elif minute_val >= (last_accepted_minute + cooldown_bars):
-#             # Cooldown has elapsed within the same trading session
-#             keep_mask[i] = True
-#             last_accepted_minute = minute_val
-#
-#     # Return filtered DataFrame and drop the temporary helper column
-#     return df_with_time.filter(pl.Series(keep_mask)).drop("minute_of_day")
+    print("=" * 88)
 
 
 def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldown_bars: int = 12):
@@ -100,25 +78,29 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldow
         "session_drift_bps",  # session trend to stop shorting into strong momentum
     ]
 
-    # Filter candidate bars according to direction
-    if direction == "long":
-        raw_candidates = df.filter(pl.col("z_impulse") >= 1.5)  # positive vol impulse
-    else:  # short
-        raw_candidates = df.filter(pl.col("z_impulse") <= -1.5,  # negative vol impulse
-                                   pl.col("max_intra_box_expansion_short") > 0.5,  # price below 30s consolidation
-                                   # Exclude bars where heavy selling (< -0.30) fails to breach/threaten 15m support (> 0 bps)
-                                   ~((pl.col("exit_flow_thrust_5s") < -0.30) & (pl.col("dist_lowest_15m_bps") > 0.0)),
-                                   )
-
     # Apply the non-overlapping candidate filter
-    candidate_pl = raw_candidates.filter(pl.col("is_candidate"))
-    # candidate_pl = filter_non_overlapping_candidates(
-    #     raw_candidates, cooldown_bars=cooldown_bars
-    # )
-    print(f"\n[{direction.upper()}] Candidate Overlap Filter (Cooldown = {cooldown_bars}m):")
+    candidate_pl = df.filter(
+        pl.col("is_candidate") & (pl.col("momentum_direction") == direction)
+    )
+
+    # 2. Count raw unconstrained impulse triggers across the dataset
+    z_col = "z_impulse"
+    raw_condition = (
+        (pl.col(z_col) >= 2.0)
+        if direction == "long"
+        else (pl.col(z_col) <= -2.0)
+    )
+    n_raw_triggers = df.filter(raw_condition).height
+    n_independent = len(candidate_pl)
+    n_suppressed = max(0, n_raw_triggers - n_independent)
+
     print(
-        f"  Raw triggers: {len(raw_candidates):,} -> Independent events:"
-        f" {len(candidate_pl):,} (Suppressed {len(raw_candidates) - len(candidate_pl):,} duplicates)"
+        f"\n[{direction.upper()}] Candidate Overlap Filter (Cooldown ="
+        f" {cooldown_bars}m):"
+    )
+    print(
+        f"  Raw triggers: {n_raw_triggers:,} -> Independent events:"
+        f" {n_independent:,} (Suppressed {n_suppressed:,} duplicates)"
     )
 
     if len(candidate_pl) < 20:
@@ -168,8 +150,9 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldow
         )
         return None
 
-    # Handle class weights safely
-    pos_weight = n_neg_train / max(n_pos_train, 1)
+    # # Handle class weights safely
+    # pos_weight = n_neg_train / max(n_pos_train, 1)
+    pos_weight = 1.0    # use true posterior probability
     # Dynamic child samples: adapts cleanly from 23 days to 80 days
     min_child = max(10, min(30, int(len(X_train) * 0.05)))
 
@@ -180,6 +163,7 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldow
         num_leaves=7,  # set to 15 for larger datasets, 2^depth - 1 capacity
         min_child_samples=min_child,  # dynamically scaled to stabilize splits on larger sample
         scale_pos_weight=pos_weight,
+        subsample_freq=1,
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=42,

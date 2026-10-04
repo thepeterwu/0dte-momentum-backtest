@@ -1,6 +1,6 @@
 from src.data_loader import load_mbo_trades, get_or_convert_parquet_files, filter_regular_trading_hours
 from src.signals import generate_micro_bars_and_signals
-from src.labeling import label_momentum_episodes
+from src.labelling import label_momentum_episodes
 from src.visualization import plot_multi_event_momentum_sample
 from src.models import train_momentum_classifier
 import scipy.stats as stats
@@ -101,10 +101,13 @@ def main():
         direction="long",
         k_baseline=15,
         z_thresh=2.0,
-        trail_mult=2.0,
-        min_stop_bps=5.0,
-        min_run_bps=5.0,
-        max_horizon=15
+        min_stop_bps=4.0,
+        target_profit_bps=7.0,
+        base_horizon=15,
+        min_horizon=3,
+        max_horizon=25,
+        cooldown_bars=12,
+        median_std=0.0003
     )
     clf_long = train_momentum_classifier(df_long, direction="long", cooldown_bars=12)
 
@@ -116,11 +119,14 @@ def main():
         full_dataset,
         direction="short",
         k_baseline=15,
-        z_thresh=1.8,
-        trail_mult=2.0,
-        min_stop_bps=4.5,
-        min_run_bps=5.0,
-        max_horizon=15
+        z_thresh=2.0,
+        min_stop_bps=4.0,
+        target_profit_bps=7.0,
+        base_horizon=15,
+        min_horizon=3,
+        max_horizon=25,
+        cooldown_bars=12,
+        median_std=0.0003
     )
     clf_short = train_momentum_classifier(df_short, direction="short", cooldown_bars=12)
 

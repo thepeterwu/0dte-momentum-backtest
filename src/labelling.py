@@ -7,9 +7,8 @@ def label_momentum_episodes(
         direction: str = "long",  # "long" or "short"
         k_baseline: int = 15,  # strictly lagged window of K bars
         z_thresh: float = 2.0,  # Z-score hurdle
-        trail_mult: float = 1.5,  # trailing stop multiplier
-        min_stop_bps: float = 5.0,  # Minimum stop floor in basis points
-        min_run_bps: float = 5.0,  # Target expansion milestone in basis points
+        min_stop_bps: float = 4.0,  # Minimum stop floor in basis points
+        target_profit_bps: float = 7.0,
         base_horizon: int = 15,
         min_horizon: int = 3,
         max_horizon: int = 25,
@@ -105,8 +104,8 @@ def label_momentum_episodes(
             continue
 
         # Stop distance in price terms
-        stop_pct = max(trail_mult * active_std[t], min_stop_bps / 10000.0)
-        vol_stop = stop_pct * p_start
+        vol_stop = (min_stop_bps / 10000.0) * p_start
+        profit_target = (target_profit_bps / 10000.0) * p_start
 
         # Hard boundary: Cannot exceed horizon OR the end of the current trading day
         intraday_limit = last_bar_of_day[t]
@@ -129,10 +128,19 @@ def label_momentum_episodes(
             for s in range(t + 1, tau_max + 1):
                 if highs[s] > peak:
                     peak = highs[s]
-                # Trailing pullback check against current bar's low
-                if (peak - lows[s]) >= vol_stop:
+
+                # UPPER BARRIER: Take profit immediately on expansion target hit
+                if (highs[s] - p_start) >= profit_target:
                     tau_end = s
-                    exit_price = peak - vol_stop  # Exact stop price
+                    exit_price = p_start + profit_target
+                    labels[t] = 1
+                    break
+
+                # LOWER BARRIER: Trailing stop loss
+                if (p_start - lows[s]) >= vol_stop:
+                    tau_end = s
+                    exit_price = p_start - vol_stop
+                    labels[t] = 0
                     break
 
             realized_mfe = (peak - p_start) / p_start * 10000.0
@@ -140,18 +148,17 @@ def label_momentum_episodes(
             mfe_bps[t] = realized_mfe
             realized_pnl_bps[t] = realized_pnl
             end_indices[t] = tau_end
-            if realized_mfe >= min_run_bps:
-                labels[t] = 1
 
             triggered = True
             t = min(max(tau_end + 1, t + cooldown_bars), intraday_limit + 1)
 
         elif direction == "short":
             is_short_impulse = active_z[t] <= -z_thresh
-            is_box_break = box_exp_short[t] > 0.50
-            is_absorption_trap = (thrust_5s[t] < -0.30) and (dist_low_15m[t] > 0.0)
+            # is_box_break = box_exp_short[t] > 0.50    # price below 30s consolidation
+            # # Exclude bars where heavy selling (< -0.30) fails to breach/threaten 15m support (> 0 bps)
+            # is_absorption_trap = (thrust_5s[t] < -0.30) and (dist_low_15m[t] > 0.0)
 
-            if is_short_impulse and is_box_break and (not is_absorption_trap):
+            if is_short_impulse:  # and is_box_break and (not is_absorption_trap):
                 is_candidate[t] = True
                 # Trough starts at entry price, not entry candle's low
                 trough = p_start
@@ -161,9 +168,19 @@ def label_momentum_episodes(
                 for s in range(t + 1, tau_max + 1):
                     if lows[s] < trough:
                         trough = lows[s]
-                    # Trailing bounce check against current bar's high
-                    if (highs[s] - trough) >= vol_stop:
+
+                    # LOWER BARRIER: Take profit immediately on downward expansion hit
+                    if (p_start - lows[s]) >= profit_target:
                         tau_end = s
+                        exit_price = p_start - profit_target
+                        labels[t] = 1
+                        break
+
+                    # UPPER BARRIER: Trailing stop loss (bounce check)
+                    if (highs[s] - p_start) >= vol_stop:
+                        tau_end = s
+                        exit_price = p_start + vol_stop
+                        labels[t] = 0
                         break
 
                 realized_mfe = (p_start - trough) / p_start * 10000.0
@@ -171,8 +188,6 @@ def label_momentum_episodes(
                 mfe_bps[t] = realized_mfe
                 realized_pnl_bps[t] = realized_pnl
                 end_indices[t] = tau_end
-                if realized_mfe >= min_run_bps:
-                    labels[t] = 1
 
                 triggered = True
                 t = min(max(tau_end + 1, t + cooldown_bars), intraday_limit + 1)
