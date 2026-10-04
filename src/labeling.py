@@ -10,8 +10,11 @@ def label_momentum_episodes(
         trail_mult: float = 1.5,  # trailing stop multiplier
         min_stop_bps: float = 5.0,  # Minimum stop floor in basis points
         min_run_bps: float = 5.0,  # Target expansion milestone in basis points
-        max_horizon: int = 15,
-        cooldown_bars: int = 12
+        base_horizon: int = 15,
+        min_horizon: int = 3,
+        max_horizon: int = 25,
+        cooldown_bars: int = 12,
+        median_std: float = 0.0003  # fixed baseline median std_dev ~ annualized vol of 9.5%
 ) -> pl.DataFrame:
     """Labels path-dependent momentum episodes using Parkinson or close-to-close volatility."""
     if direction not in ["long", "short"]:
@@ -86,6 +89,12 @@ def label_momentum_episodes(
             else n - 1
         )
 
+    # Horizon at time t: H_t = base_horizon * (median_std / sigma_t)
+    scaled_horizons = np.round(
+        base_horizon * (median_std / (active_std + 1e-8))
+    ).astype(np.int32)
+    dynamic_horizons = np.clip(scaled_horizons, min_horizon, max_horizon)
+
     # Path-dependent evaluation
     t = k_baseline + 1
     while t < n - max_horizon:
@@ -100,9 +109,10 @@ def label_momentum_episodes(
 
         # Hard boundary: Cannot exceed horizon OR the end of the current trading day
         intraday_limit = last_bar_of_day[t]
-        tau_max = min(t + max_horizon, intraday_limit)
+        current_horizon = int(dynamic_horizons[t])
+        tau_max = min(t + current_horizon, intraday_limit)
 
-        if tau_max <= t:
+        if (intraday_limit - t) < min_horizon:
             t += 1
             continue
 
@@ -129,7 +139,7 @@ def label_momentum_episodes(
                 labels[t] = 1
 
             triggered = True
-            t = max(tau_end + 1, t + cooldown_bars)
+            t = min(max(tau_end + 1, t + cooldown_bars), intraday_limit + 1)
 
         elif direction == "short":
             is_short_impulse = active_z[t] <= -z_thresh
@@ -157,7 +167,7 @@ def label_momentum_episodes(
                     labels[t] = 1
 
                 triggered = True
-                t = max(tau_end + 1, t + cooldown_bars)
+                t = min(max(tau_end + 1, t + cooldown_bars), intraday_limit + 1)
 
         if not triggered:
             t += 1
@@ -169,5 +179,6 @@ def label_momentum_episodes(
         pl.Series("target_mfe_bps", mfe_bps),
         pl.Series("target_end_idx", end_indices),
         pl.Series("is_candidate", is_candidate),
+        pl.Series("dynamic_horizon", dynamic_horizons),
         pl.lit(direction).alias("momentum_direction"),
     ])
