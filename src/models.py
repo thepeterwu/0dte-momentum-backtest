@@ -3,6 +3,9 @@ import polars as pl
 import numpy as np
 from sklearn.metrics import classification_report, roc_auc_score, precision_recall_curve
 
+#   TODO: Implement Max drawdown
+#       : Add walk forward testing
+
 
 def evaluate_trading_thresholds(y_test: np.ndarray, preds_prob: np.ndarray, candidate_test_df, direction: str = "long"):
     print("\n" + "=" * 70)

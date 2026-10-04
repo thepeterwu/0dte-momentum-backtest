@@ -68,6 +68,7 @@ def label_momentum_episodes(
 
     labels = np.zeros(n, dtype=np.int32)
     mfe_bps = np.zeros(n, dtype=np.float64)
+    realized_pnl_bps = np.zeros(n, dtype=np.float64)
     end_indices = np.full(n, -1, dtype=np.int32)
     is_candidate = np.zeros(n, dtype=bool)
 
@@ -123,6 +124,7 @@ def label_momentum_episodes(
             # Peak starts at entry price, not entry candle's high
             peak = p_start
             tau_end = tau_max
+            exit_price = closes[tau_max]  # Default exit if timed out
 
             for s in range(t + 1, tau_max + 1):
                 if highs[s] > peak:
@@ -130,10 +132,13 @@ def label_momentum_episodes(
                 # Trailing pullback check against current bar's low
                 if (peak - lows[s]) >= vol_stop:
                     tau_end = s
+                    exit_price = peak - vol_stop  # Exact stop price
                     break
 
             realized_mfe = (peak - p_start) / p_start * 10000.0
+            realized_pnl = (exit_price - p_start) / p_start * 10000.0
             mfe_bps[t] = realized_mfe
+            realized_pnl_bps[t] = realized_pnl
             end_indices[t] = tau_end
             if realized_mfe >= min_run_bps:
                 labels[t] = 1
@@ -151,6 +156,7 @@ def label_momentum_episodes(
                 # Trough starts at entry price, not entry candle's low
                 trough = p_start
                 tau_end = tau_max
+                exit_price = closes[tau_max]  # Default exit if timed out
 
                 for s in range(t + 1, tau_max + 1):
                     if lows[s] < trough:
@@ -161,7 +167,9 @@ def label_momentum_episodes(
                         break
 
                 realized_mfe = (p_start - trough) / p_start * 10000.0
+                realized_pnl = (p_start - exit_price) / p_start * 10000.0
                 mfe_bps[t] = realized_mfe
+                realized_pnl_bps[t] = realized_pnl
                 end_indices[t] = tau_end
                 if realized_mfe >= min_run_bps:
                     labels[t] = 1
@@ -180,5 +188,6 @@ def label_momentum_episodes(
         pl.Series("target_end_idx", end_indices),
         pl.Series("is_candidate", is_candidate),
         pl.Series("dynamic_horizon", dynamic_horizons),
+        pl.Series("target_realized_pnl_bps", realized_pnl_bps),
         pl.lit(direction).alias("momentum_direction"),
     ])
