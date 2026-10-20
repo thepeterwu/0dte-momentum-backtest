@@ -35,27 +35,27 @@ def generate_micro_bars_and_signals(trades_df: pl.DataFrame) -> pl.DataFrame:
             (pl.col("close_1s") / pl.col("close_1s").shift(1)).log().fill_null(0.0).alias("log_ret_1s")
         ])
         .with_columns([
-            # 30-second calm baseline (lagged 5s to avoid self-contamination), null estimate to be 1 bps
+            # 30-second vol SMA baseline (lagged 5s to avoid self-contamination), null estimate to be 1 bps
             # (30s and 5s calibrated via grid search in tune_micro_signals.py)
             (pl.col("log_ret_1s").shift(5).rolling_std(window_size=30, min_samples=15)
              .fill_null(0.0001).alias("vol_calm_30s")),
-            # 3-minute macro baseline, null estimate to be 3 bps
+            # 3-minute vol SMA baseline, null estimate to be 3 bps
             (pl.col("log_ret_1s").rolling_std(window_size=180, min_samples=30)
              .fill_null(0.0003).alias("vol_macro_3m")),
-            # 5-second price velocity (5s calibrated via grid search in tune_micro_signals.py)
+            # 5-second price velocity: %move in 5 second return (5s calibrated via grid search in tune_micro_signals.py)
             (pl.col("close_1s") / pl.col("close_1s").shift(5) - 1.0).fill_null(0.0).alias("burst_ret_5s"),
-            # 30-second consolidation channel bounds (lagged 5s)
+            # 30-second consolidation channel bounds: moving min/max over 30s box (lagged 5s)
             pl.col("high_1s").shift(5).rolling_max(window_size=30).alias("box_high_30s"),
             pl.col("low_1s").shift(5).rolling_min(window_size=30).alias("box_low_30s"),
-            # 5-second aggressor flow thrust
+            # 5-second aggressor flow thrust: delta in buy/sell volume
             (pl.col("buy_vol_1s").rolling_sum(5) - pl.col("sell_vol_1s").rolling_sum(5)).alias("delta_5s"),
             (pl.col("vol_1s").rolling_sum(5) + 1e-6).alias("vol_total_5s"),
         ])
         .with_columns([
             # Micro-to-Macro Volatility Compression Ratio
             (pl.col("vol_calm_30s") / (pl.col("vol_macro_3m") + 1e-6)).alias("micro_compression_ratio"),
-            # Micro-Normalized Z-Score Burst
-            (pl.col("burst_ret_5s") / (pl.col("vol_calm_30s") * np.sqrt(10) + 1e-6)).alias("z_micro_burst"),
+            # Micro-Normalized Z-Score Burst (mean drift in 5s return is 0, sqrt(5) is time scaling factor)
+            (pl.col("burst_ret_5s") / (pl.col("vol_calm_30s") * np.sqrt(5) + 1e-6)).alias("z_micro_burst"),
             # Consolidation box breakout ratios
             ((pl.col("close_1s") - pl.col("box_high_30s")) / (
                     pl.col("box_high_30s") - pl.col("box_low_30s") + 1e-4)).alias("box_expansion_long"),

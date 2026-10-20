@@ -6,7 +6,7 @@ from src.signals import sweep_micro_parameters
 
 def main():
     data_dir = Path("data")
-    # Use a representative sample of 5 to 10 trading days for calibration
+    # Use a representative sample of 10 trading days for calibration
     parquet_files = sorted(data_dir.glob("*.mbo.parquet"))[:10]
 
     all_sec_bars = []

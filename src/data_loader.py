@@ -52,8 +52,7 @@ def get_or_convert_parquet_files(data_dir: str = "data", max_workers: int = 4) -
 
 def load_mbo_trades(parquet_path: Path) -> pl.DataFrame:
     """
-    Lazily scans the Parquet file, extracts executions (trades only),
-    scales price to floating-point dollars, and returns a sorted DataFrame.
+    Lazily scans the Parquet file, extracts executions (trades only) and returns a sorted DataFrame.
     Databento schema: https://databento.com/docs/schemas-and-data-formats/mbo#fields-mbo?historical=python&live=python&reference=python
     """
     q = (

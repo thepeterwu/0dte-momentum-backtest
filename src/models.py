@@ -169,6 +169,7 @@ def train_momentum_classifier(df: pl.DataFrame, direction: str = "long", cooldow
         random_state=42,
         verbosity=-1,  # -1 = Fatal only (silences Info and Warnings)
         force_col_wise=True,  # Removes the threading evaluation overhead prompt
+        importance_type="gain", # Use information gain instead of default split count
     )
 
     clf.fit(X_train, y_train)
