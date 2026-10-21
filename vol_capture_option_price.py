@@ -232,7 +232,7 @@ async def main():
         while True:
             now_ny = datetime.now(NY_TZ)
 
-            start_window = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+            start_window = now_ny.replace(hour=9, minute=45, second=0, microsecond=0)
             end_window = now_ny.replace(hour=16, minute=32, second=0, microsecond=0)
 
             if now_ny < start_window:

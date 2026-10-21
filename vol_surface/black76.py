@@ -5,6 +5,8 @@ import math
 from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
+from scipy.stats import norm
 
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -33,8 +35,13 @@ class SliceAuditReport:
     raw_quotes_count: int
     cleaned_quotes_count: int = 0
     dropped_crossed_quotes: int = 0
-    dropped_zero_or_negative_bids: int = 0
+    dropped_duplicate_quotes: int = 0
+    dropped_min_tick_quotes: int = 0
+    dropped_missing_or_negative_asks: int = 0
+    dropped_non_monotonic_quotes: int = 0
     dropped_wide_spreads: int = 0
+    dropped_zero_or_negative_bids: int = 0
+    total_pairs_found: int = 0
     ntm_pairs_found: int = 0
     parity_r2: float = 0.0
     inferred_discount: float = 0.0
@@ -107,64 +114,61 @@ def extract_forward_and_discount(
         puts_df: pd.DataFrame,
         spot_ref: float,
         tau: float,
-        audit: "SliceAuditReport",
+        audit: SliceAuditReport,
 ) -> tuple[float, float] | None:
-    """Calibrates put-call parity without unverified fallbacks.
-
-  Rejects slice if economic bounds are breached.
-  """
-
-    # Ensure 1-to-1 pairing per strike
-    c_unique = calls_df.drop_duplicates(subset=["strike"])
-    p_unique = puts_df.drop_duplicates(subset=["strike"])
-
+    """Calibrates put-call parity strictly on NTM pairs without silent fallbacks."""
     pairs = pd.merge(
-        c_unique[["strike", "mid"]],
-        p_unique[["strike", "mid"]],
+        calls_df[["strike", "mid"]],
+        puts_df[["strike", "mid"]],
         on="strike",
         suffixes=("_call", "_put"),
     )
-    audit.ntm_pairs_found = len(pairs)
+    audit.total_pairs_found = len(pairs)
 
-    # Require at least 3 distinct NTM matched pairs for reliable regression
-    if len(pairs) < 3:
+    # Restrict regression strictly to near-the-money (+/- 2% around spot)
+    ntm_pairs = pairs[
+        (pairs["strike"] >= spot_ref * 0.98) & (pairs["strike"] <= spot_ref * 1.02)
+        ]
+    audit.ntm_pairs_found = len(ntm_pairs)
+
+    # Require at least n distinct NTM matched pairs; do not silently fall back to wings
+    n = 5
+    if len(ntm_pairs) < n:
         audit.status = "REJECTED"
         audit.rejection_reason = (
-            f"INSUFFICIENT_PARITY_PAIRS: Found {len(pairs)}, required >= 3"
+            f"INSUFFICIENT_NTM_PARITY_PAIRS: Found {len(ntm_pairs)} in +/-2% NTM"
+            f" window (total pairs={len(pairs)}), required >= {n}"
         )
         audit_logger.error(
             f"[{audit.expiry}] {audit.rejection_reason} at spot {spot_ref:.2f}"
         )
         return None
 
-    # Restrict regression to near-the-money (+/- 2% around spot)
-    ntm_pairs = pairs[
-        (pairs["strike"] >= spot_ref * 0.98) & (pairs["strike"] <= spot_ref * 1.02)
-        ]
-    if len(ntm_pairs) < 3:
-        ntm_pairs = pairs  # Fall back to all pairs if local NTM density is thin
-
     K = ntm_pairs["strike"].values
     y = (ntm_pairs["mid_call"] - ntm_pairs["mid_put"]).values
 
     # Ordinary Least Squares: y = beta_0 + beta_1 * K
-    # Put-Call Parity: C - P = D*F - D*K => beta_1 = -D, beta_0 = D*F
     poly = np.polyfit(K, y, deg=1)
     beta_1, beta_0 = poly[0], poly[1]
 
-    # Compute R^2 of parity fit
     y_pred = np.polyval(poly, K)
     ss_res = np.sum((y - y_pred) ** 2)
     ss_tot = np.sum((y - np.mean(y)) ** 2)
-    r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+
+    if ss_tot <= 1e-12:
+        audit.status = "REJECTED"
+        audit.rejection_reason = (
+            "DEGENERATE_PARITY_REGRESSION: Zero variance in (C - P)"
+        )
+        audit_logger.error(f"[{audit.expiry}] {audit.rejection_reason}")
+        return None
+
+    r_squared = 1.0 - (ss_res / ss_tot)
     audit.parity_r2 = float(r_squared)
 
     discount_factor = -beta_1
     audit.inferred_discount = float(discount_factor)
 
-    # Strict validation of Discount Factor (implied risk-free rate)
-    # Rate range [-2%, +12%] plus a 1.5% tick-discretization margin for short tenors
-    # to protect against noise causing DISCOUNT_BOUND_VIOLATION
     min_valid_d = math.exp(-0.12 * tau) - 0.015
     max_valid_d = math.exp(0.02 * tau) + 0.015
 
@@ -182,10 +186,8 @@ def extract_forward_and_discount(
     forward = beta_0 / discount_factor
     audit.inferred_forward = float(forward)
 
-    # Strict validation of Forward Price
-    # Forward should not deviate from spot by more than a reasonable carry range for tau
-    # Max theoretical drift over short tenors: +/- (10% * tau + 0.5% buffer)
-    max_allowed_pct_diff = 0.10 * tau + 0.0075
+    drift_buffer = 0.005
+    max_allowed_pct_diff = 0.10 * tau + drift_buffer
     pct_diff = abs(forward - spot_ref) / spot_ref
 
     if pct_diff > max_allowed_pct_diff:
@@ -197,7 +199,6 @@ def extract_forward_and_discount(
         audit_logger.error(f"[{audit.expiry}] {audit.rejection_reason}")
         return None
 
-    # Parity Linearity Check
     if r_squared < 0.98:
         audit.status = "REJECTED"
         audit.rejection_reason = (
@@ -216,11 +217,8 @@ def extract_forward_and_discount(
 def process_snapshot_slice(
         snapshot_df: pd.DataFrame, expiry: str
 ) -> tuple[ExpirySlice | None, SliceAuditReport]:
-    """Processes, cleans, and validates a maturity slice.
-
-  Logs every data anomaly and drops the slice if assumptions are violated.
-  """
-    df_exp = snapshot_df[snapshot_df["expiry"] == expiry].copy()
+    """Processes, cleans, and validates a maturity slice with full audit logging."""
+    df_exp = snapshot_df[snapshot_df["expiry"].astype(str) == str(expiry)].copy()
     timestamp_str = (
         df_exp["timestamp"].iloc[0] if not df_exp.empty else "UNKNOWN"
     )
@@ -238,7 +236,6 @@ def process_snapshot_slice(
         audit_logger.warning(f"[{expiry}] No rows present in snapshot.")
         return None, audit
 
-    # Compute time-to-maturity
     tau = compute_tau(timestamp_str, str(expiry), audit)
     if tau is None:
         return None, audit
@@ -250,12 +247,29 @@ def process_snapshot_slice(
         audit_logger.error(f"[{expiry}] Invalid underlying spot: {spot_ref}")
         return None, audit
 
-    # Detailed Quote Sanitization & Issue Tracking
     initial_count = len(df_exp)
 
-    # Check non-positive bids (including -1.0 sentinel)
-    zero_bid_mask = (df_exp["bid"].isna()) | (df_exp["bid"] <= 0)
-    for _, row in df_exp[zero_bid_mask].iterrows():
+    # 1. Check and log duplicate (strike, right) rows
+    dup_mask = df_exp.duplicated(subset=["strike", "right"], keep="first")
+    for _, row in df_exp[dup_mask].iterrows():
+        audit.rejected_strikes_detail.append({
+            "strike": row["strike"],
+            "right": row["right"],
+            "bid": row["bid"],
+            "ask": row["ask"],
+            "issue": "DUPLICATE_STRIKE_QUOTE",
+        })
+    audit.dropped_duplicate_quotes = int(dup_mask.sum())
+    if audit.dropped_duplicate_quotes > 0:
+        audit_logger.warning(
+            f"[{expiry}] Dropped {audit.dropped_duplicate_quotes} duplicate"
+            " (strike, right) rows."
+        )
+    df_clean = df_exp[~dup_mask].copy()
+
+    # 2. Check non-positive bids (including -1.0 sentinel)
+    zero_bid_mask = (df_clean["bid"].isna()) | (df_clean["bid"] <= 0)
+    for _, row in df_clean[zero_bid_mask].iterrows():
         audit.rejected_strikes_detail.append({
             "strike": row["strike"],
             "right": row["right"],
@@ -264,12 +278,23 @@ def process_snapshot_slice(
             "issue": "NON_POSITIVE_BID",
         })
     audit.dropped_zero_or_negative_bids = int(zero_bid_mask.sum())
-    df_clean = df_exp[~zero_bid_mask].copy()
+    df_clean = df_clean[~zero_bid_mask].copy()
 
-    # Check crossed markets (bid >= ask)
-    crossed_mask = (df_clean["ask"].isna()) | (
-            df_clean["bid"] >= df_clean["ask"]
-    )
+    # 3. Check missing or non-positive asks separately from crossed markets
+    bad_ask_mask = (df_clean["ask"].isna()) | (df_clean["ask"] <= 0)
+    for _, row in df_clean[bad_ask_mask].iterrows():
+        audit.rejected_strikes_detail.append({
+            "strike": row["strike"],
+            "right": row["right"],
+            "bid": row["bid"],
+            "ask": row["ask"],
+            "issue": "MISSING_OR_NON_POSITIVE_ASK",
+        })
+    audit.dropped_missing_or_negative_asks = int(bad_ask_mask.sum())
+    df_clean = df_clean[~bad_ask_mask].copy()
+
+    # 4. Check crossed markets (bid >= ask)
+    crossed_mask = df_clean["bid"] >= df_clean["ask"]
     for _, row in df_clean[crossed_mask].iterrows():
         audit.rejected_strikes_detail.append({
             "strike": row["strike"],
@@ -281,11 +306,10 @@ def process_snapshot_slice(
     audit.dropped_crossed_quotes = int(crossed_mask.sum())
     df_clean = df_clean[~crossed_mask].copy()
 
-    # Mid-quote and wide-spread filter
+    # 5. Mid-quote and wide-spread filter
     df_clean["mid"] = 0.5 * (df_clean["bid"] + df_clean["ask"])
     df_clean["spread"] = df_clean["ask"] - df_clean["bid"]
 
-    # Exclude extreme wide spreads (e.g., spread > 0.8 * mid for mid > 1.0)
     wide_spread_mask = (df_clean["mid"] > 1.0) & (
             df_clean["spread"] > 0.80 * df_clean["mid"]
     )
@@ -302,58 +326,112 @@ def process_snapshot_slice(
 
     audit.cleaned_quotes_count = len(df_clean)
 
-    # Log cleaning summary
-    total_dropped = (
-            audit.dropped_zero_or_negative_bids
-            + audit.dropped_crossed_quotes
-            + audit.dropped_wide_spreads
-    )
+    total_dropped = initial_count - audit.cleaned_quotes_count
     if total_dropped > 0:
         audit_logger.info(
             f"[{expiry}] Sanitized quotes: {initial_count} raw ->"
             f" {audit.cleaned_quotes_count} valid. Dropped {total_dropped} issues"
-            f" (ZeroBids={audit.dropped_zero_or_negative_bids},"
+            f" (Dups={audit.dropped_duplicate_quotes},"
+            f" ZeroBids={audit.dropped_zero_or_negative_bids},"
+            f" BadAsks={audit.dropped_missing_or_negative_asks},"
             f" Crossed={audit.dropped_crossed_quotes},"
             f" WideSpreads={audit.dropped_wide_spreads})."
         )
 
-    # Calibrate Forward & Discount via Put-Call Parity
     calls = df_clean[df_clean["right"] == "C"]
     puts = df_clean[df_clean["right"] == "P"]
 
     calib_res = extract_forward_and_discount(calls, puts, spot_ref, tau, audit)
     if calib_res is None:
-        # Slice is rejected because economic parameters failed validation
         return None, audit
 
     forward, discount_factor = calib_res
 
     # Partition into Liquid OTM Contracts
-    otm_calls = calls[calls["strike"] >= forward].copy()
+    otm_calls = calls[calls["strike"] >= forward].sort_values("strike").copy()
     otm_calls["is_call"] = True
 
-    otm_puts = puts[puts["strike"] < forward].copy()
+    otm_puts = puts[puts["strike"] < forward].sort_values("strike").copy()
     otm_puts["is_call"] = False
 
-    otm_df = (
-        pd.concat([otm_puts, otm_calls])
-        .sort_values("strike")
-        .drop_duplicates(subset=["strike"])
-    )
+    # Drop minimum-tick wing quotes (bid <= 0.05 on SPX causes flat-price variance kinks)
+    min_tick_threshold = 0.05
+    for sub_df in [otm_puts, otm_calls]:
+        min_tick_mask = sub_df["bid"] <= min_tick_threshold
+        for _, row in sub_df[min_tick_mask].iterrows():
+            audit.rejected_strikes_detail.append({
+                "strike": row["strike"],
+                "right": row["right"],
+                "bid": row["bid"],
+                "ask": row["ask"],
+                "issue": "MIN_TICK_WING_QUOTE",
+            })
+        audit.dropped_min_tick_quotes += int(min_tick_mask.sum())
 
-    # Require a critical mass of strikes to form a smile
-    if len(otm_df) < 5:
+    otm_puts = otm_puts[otm_puts["bid"] > min_tick_threshold].copy()
+    otm_calls = otm_calls[otm_calls["bid"] > min_tick_threshold].copy()
+
+    # Enforce Vertical Spread Monotonicity (No quote-level static arbitrage)
+    # OTM Puts (K < F): mid-price must strictly increase as strike increases toward F
+    valid_put_indices = []
+    # Traverse puts from the highest strike (closest to ATM, most liquid) down to the lowest strike
+    max_allowed_put_mid = float("inf")
+    for idx, row in otm_puts.iloc[::-1].iterrows():
+        if row["mid"] < max_allowed_put_mid:
+            valid_put_indices.append(idx)
+            max_allowed_put_mid = row["mid"]
+        else:
+            audit.dropped_non_monotonic_quotes += 1
+            audit.rejected_strikes_detail.append({
+                "strike": row["strike"],
+                "right": "P",
+                "bid": row["bid"],
+                "ask": row["ask"],
+                "issue": "NON_MONOTONIC_PUT_MID",
+            })
+    otm_puts = otm_puts.loc[reversed(valid_put_indices)].copy()
+
+    # OTM Calls (K >= F): mid-price must strictly decrease as strike increases away from F
+    valid_call_indices = []
+    max_allowed_call_mid = float("inf")
+    for idx, row in otm_calls.iterrows():
+        if row["mid"] < max_allowed_call_mid:
+            valid_call_indices.append(idx)
+            max_allowed_call_mid = row["mid"]
+        else:
+            audit.dropped_non_monotonic_quotes += 1
+            audit.rejected_strikes_detail.append({
+                "strike": row["strike"],
+                "right": "C",
+                "bid": row["bid"],
+                "ask": row["ask"],
+                "issue": "NON_MONOTONIC_CALL_MID",
+            })
+    otm_calls = otm_calls.loc[valid_call_indices].copy()
+
+    if audit.dropped_min_tick_quotes > 0 or audit.dropped_non_monotonic_quotes > 0:
+        audit_logger.info(
+            f"[{expiry}] OTM Arbitrage Filter: Dropped"
+            f" {audit.dropped_min_tick_quotes} min-tick wing quotes and"
+            f" {audit.dropped_non_monotonic_quotes} non-monotonic quotes."
+        )
+
+    otm_df = pd.concat([otm_puts, otm_calls]).sort_values("strike")
+
+    min_clean_strikes = 5
+    if len(otm_df) < min_clean_strikes:
         audit.status = "REJECTED"
         audit.rejection_reason = (
-            f"INSUFFICIENT_CLEAN_STRIKES: {len(otm_df)} available, required >= 5"
+            f"INSUFFICIENT_CLEAN_STRIKES: {len(otm_df)} available, required >="
+            f" {min_clean_strikes}"
         )
         audit_logger.error(f"[{expiry}] {audit.rejection_reason}")
         return None, audit
 
     audit.status = "PASSED"
     audit_logger.info(
-        f"[{expiry}] Successfully validated: {len(otm_df)} strikes, F={forward:.2f},"
-        f" D={discount_factor:.5f}, R^2={audit.parity_r2:.4f}"
+        f"[{expiry}] Successfully validated: {len(otm_df)} strikes,"
+        f" F={forward:.2f}, D={discount_factor:.5f}, R^2={audit.parity_r2:.4f}"
     )
 
     slice_obj = ExpirySlice(
@@ -370,3 +448,148 @@ def process_snapshot_slice(
     )
 
     return slice_obj, audit
+
+
+# =====================================================================
+# BLACK-76 ANALYTICAL PRICER & VEGA
+# =====================================================================
+SQRT_2PI = math.sqrt(2.0 * math.pi)
+
+
+def black76_price(
+        F: float,
+        K: float,
+        tau: float,
+        sigma: float,
+        discount_factor: float,
+        is_call: bool,
+) -> float:
+    """Computes European option price under Black-76 forward model."""
+    if sigma <= 0.0 or tau <= 0.0 or F <= 0.0 or K <= 0.0 or discount_factor <= 0.0:
+        raise ValueError(
+            f"Invalid Black-76 parameters: F={F}, K={K}, tau={tau}, sigma={sigma},"
+            f" D={discount_factor}. All inputs must be strictly positive."
+        )
+
+    vol_sqrt_tau = sigma * math.sqrt(tau)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * tau) / vol_sqrt_tau
+    d2 = d1 - vol_sqrt_tau
+
+    if is_call:
+        return discount_factor * (F * norm.cdf(d1) - K * norm.cdf(d2))
+    else:
+        return discount_factor * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
+
+
+def black76_vega(
+        F: float, K: float, tau: float, sigma: float, discount_factor: float
+) -> float:
+    """Computes analytical Black-76 Vega: dPrice / dSigma."""
+    if sigma <= 0.0 or tau <= 0.0 or F <= 0.0 or K <= 0.0 or discount_factor <= 0.0:
+        raise ValueError(
+            f"Invalid Black-76 Vega parameters: F={F}, K={K}, tau={tau},"
+            f" sigma={sigma}, D={discount_factor}. All inputs must be strictly"
+            " positive."
+        )
+
+    vol_sqrt_tau = sigma * math.sqrt(tau)
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * tau) / vol_sqrt_tau
+    n_d1 = math.exp(-0.5 * d1 * d1) / SQRT_2PI
+
+    return discount_factor * F * math.sqrt(tau) * n_d1
+
+
+# =====================================================================
+# IMPLIED VOLATILITY INVERSION (NEWTON-RAPHSON + BRENTQ)
+# =====================================================================
+def invert_iv_newton_raphson(
+        price: float,
+        F: float,
+        K: float,
+        tau: float,
+        discount_factor: float,
+        is_call: bool,
+        expiry: str = "UNKNOWN",
+        max_iter: int = 20,
+        tol: float = 1e-6,
+) -> float | None:
+    """Inverts European market price to Black-76 Implied Volatility.
+
+  Logs any arbitrage bound violations, solver fallbacks, or convergence failures.
+  """
+    right_label = "C" if is_call else "P"
+
+    if price <= 0.0 or tau <= 0.0 or F <= 0.0 or K <= 0.0 or discount_factor <= 0.0:
+        audit_logger.error(
+            f"[{expiry} K={K} {right_label}] IV inversion rejected: non-positive"
+            f" input (price={price}, F={F}, tau={tau}, D={discount_factor})."
+        )
+        return None
+
+    # 1. No-arbitrage lower boundary (intrinsic value >= 0)
+    intrinsic = max(
+        0.0, discount_factor * ((F - K) if is_call else (K - F))
+    )
+    if price < intrinsic - 1e-4:
+        audit_logger.warning(
+            f"[{expiry} K={K} {right_label}] IV inversion rejected: price"
+            f" {price:.4f} violates intrinsic lower bound {intrinsic:.4f}."
+        )
+        return None
+
+    # 2. No-arbitrage upper boundary
+    max_price = discount_factor * F if is_call else discount_factor * K
+    if price >= max_price:
+        audit_logger.warning(
+            f"[{expiry} K={K} {right_label}] IV inversion rejected: price"
+            f" {price:.4f} >= upper bound {max_price:.4f}."
+        )
+        return None
+
+    # 3. Initial Volatility Estimate (Brenner-Subrahmanyam approximation)
+    sigma = max(
+        0.05,
+        min(SQRT_2PI / math.sqrt(tau) * (price / (discount_factor * F)), 2.0),
+    )
+
+    # 4. Newton-Raphson loop
+    nr_failure_reason = "MAX_ITER_EXCEEDED"
+    for _ in range(max_iter):
+        p = black76_price(F, K, tau, sigma, discount_factor, is_call)
+        v = black76_vega(F, K, tau, sigma, discount_factor)
+        diff = p - price
+
+        if abs(diff) < tol:
+            return sigma
+
+        if v < 1e-8:
+            nr_failure_reason = f"LOW_VEGA ({v:.2e})"
+            break
+
+        step = diff / v
+        sigma_next = sigma - step
+
+        if sigma_next <= 0.001 or sigma_next > 5.0:
+            nr_failure_reason = f"STEP_OUT_OF_BOUNDS ({sigma_next:.4f})"
+            break
+
+        sigma = sigma_next
+
+    # 5. Logged Fallback: Brent's Method
+    audit_logger.info(
+        f"[{expiry} K={K} {right_label}] Newton-Raphson did not converge"
+        f" ({nr_failure_reason}); falling back to Brent's method."
+    )
+
+    def objective(s: float) -> float:
+        return black76_price(F, K, tau, s, discount_factor, is_call) - price
+
+    try:
+        sigma_brent = brentq(objective, a=0.005, b=4.0, xtol=tol, maxiter=30)
+        return float(sigma_brent)
+    except Exception as e:
+        audit_logger.error(
+            f"[{expiry} K={K} {right_label}] IV root-finding failed in both"
+            f" Newton-Raphson and Brentq (price={price:.4f}, F={F:.2f}): {e}"
+        )
+        return None
