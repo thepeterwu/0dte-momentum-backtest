@@ -228,7 +228,7 @@ class SmileSlice:
         return float(g[0]) if is_scalar else g
 
     # =====================================================================
-    # STRIKE-TO-DELTA INVERSION METHODS (PROPERLY SCOPED IN CLASS)
+    # STRIKE-TO-DELTA INVERSION METHODS
     # =====================================================================
     def get_forward_delta(
             self, x: float | np.ndarray, is_call: bool = True

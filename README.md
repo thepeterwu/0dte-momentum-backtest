@@ -35,22 +35,15 @@ pip install -r requirements.txt
 └── vol_run_surface_pipeline.py       # Top-level orchestrator & batch processing runner
 ```
 ### Summary
-End-to-end Python pipeline that captures delayed SPX option chain 1 min snapshots via ib_async and constructs an 
-arbitrage-audited 2D Implied Volatility Surface $\Sigma(\Delta, \tau)$. Rather than relying on external interest rate or 
-dividend curves, the pipeline extracts synthetic forwards and discount factors directly from liquid near-the-money 
-options via Put-Call Parity OLS regression. It then inverts out-of-the-money quotes to Black-76 implied volatilities, 
-fits $C^2$ natural cubic splines in Total Implied Variance space $w(x) = \sigma^2(x)\tau$ with linear wing clamping 
-bounded by Lee’s Moment Formula ($\vert{}w'\vert{} \le 2$), and resolves the strike-to-delta circularity via fixed-point 
-iteration. Every stage is fail-fast and audit-logged, explicitly testing for both cross-sectional butterfly arbitrage 
-($g(x) \ge 0$) and cross-maturity calendar spread arbitrage ($\partial_\tau w \ge 0$).
+End-to-end Python pipeline that captures delayed SPX option chain 1 min snapshots via ib_async and constructs an arbitrage-audited 2D Implied Volatility Surface $\Sigma(\Delta, \tau)$. Rather than relying on external interest rate or dividend curves, the pipeline extracts synthetic forwards and discount factors directly from liquid near-the-money options via Put-Call Parity OLS regression. It then inverts out-of-the-money quotes to Black-76 implied volatilities, fits $C^2$ natural cubic splines in Total Implied Variance space $w(x) = \sigma^2(x)\tau$ with linear wing clamping bounded by Lee’s Moment Formula ($\vert{}w'\vert{} \le 2$), and resolves the strike-to-delta circularity via fixed-point iteration. Every stage is fail-fast and audit-logged, explicitly testing for both cross-sectional butterfly arbitrage ($g(x) \ge 0$) and cross-maturity calendar spread arbitrage ($\partial_\tau w \ge 0$).
 
 ### Data Hygiene & Parity Calibration
 - Clean raw quotes: duplicate strike quotes, missing or non-positive bid/ask (IBKR convention for no bids), crossed-spreads, wide spreads for deep ITM strikes
-- extract implied forward $F(\tau)$ and discount factor $D(\tau)$ per maturity slice; partition into liquid OTM contracts.
+- Extract implied forward $F(\tau)$ and discount factor $D(\tau)$ per maturity slice; partition into liquid OTM contracts.
   - Put-Call Parity OLS: \
     $C_{\text{mid}}(K) - P_{\text{mid}}(K) = \beta_0 + \beta_1 K$ \
     $D = -\beta_1 = e^{-r\tau}, \quad F = \frac{\beta_0}{D}$
-- Eliminates model risk from guessing SOFR rates or discrete S&P 500 dividend schedules. Restricting to OTM options ($K < F$ Puts, $K \ge F$ Calls) avoids wide ITM bid-ask spreads and early-exercise/liquidity distortions.
+- Eliminates model risk from guessing SOFR rates or discrete S&P 500 dividend schedules. Restricting to OTM options ($K < F$ Puts, $K \ge F$ Calls) avoids wide ITM bid-ask spreads and liquidity distortions.
 
 ### Black-76 IV Inversion
 - Invert OTM mid-prices to implied volatility $\sigma_i$; transform strikes to forward log-moneyness $x_i$.
@@ -69,8 +62,10 @@ iteration. Every stage is fail-fast and audit-logged, explicitly testing for bot
 - Convert strike-based smiles onto standardized delta pillars $\Delta^* \in \{\pm 10\Delta, \pm 25\Delta, 50\Delta\}$.
 - Solved via Fixed-Point Iteration on $w(x)$:
   - $d_1^* = N^{-1}(\Delta_C^*)$
+  - $w(x^{(k)}) = \sigma^2(x^{(k)}) * \tau$ at $x^{(k)} = \ln(K / F)$
   - $x^{(k+1)} = \frac{1}{2}w(x^{(k)}) - d_1^*\sqrt{w(x^{(k)})}$
-- Resolves the circularity where finding $\Delta$ requires $x$, which depends on $\sigma(x)$, which depends on $x$. Standardizing on $\Delta$ holds probability moneyness ($\frac{\ln(F/K)}{\sigma\sqrt{\tau}}$) constant across maturities.
+- Resolves the circularity where finding $\Delta$ requires $x$, which depends on $w(x)$, which depends on $x$. 
+  Standardizing on $\Delta$ holds probability moneyness ($\frac{\ln(F/K)}{\sigma\sqrt{\tau}}$) constant across maturities.
 ### 2D Surface Assembly & Arbitrage Audit
 - Assemble $(\Delta, \tau)$ surface; interpolate across maturities; audit static no-arbitrage conditions.
 - Term Structure - Linear in $w(\Delta, \tau)$:
@@ -82,7 +77,8 @@ iteration. Every stage is fail-fast and audit-logged, explicitly testing for bot
 ## Assumptions
 1. **Zero Silent Fallbacks:**
    - *Assumption*: Corrupted quotes must never be masked with heuristic defaults (such as assuming $F = S$ or $D = 1.0$).
-   - *Reasoning*: On SPX (~7,700), misestimating the forward by even 5 index points shifts every call and put moneyness coordinate $x = \ln(K/F)$, inducing an artificial kink at $x=0$ where OTM puts transition to OTM calls. Every rejected quote or slice is logged with reasons.
+   - *Reasoning*: On SPX (~7,700), mis-estimating the forward by even 5 index points shifts every call and put 
+     moneyness coordinate $x = \ln(K/F)$, inducing an artificial kink at $x=0$ where OTM puts transition to OTM calls. Every rejected quote or slice is logged with reasons.
 2. **ACT/365 Intraday Minute-Precision $\tau$:**
    - *Assumption*: Time-to-maturity is measured continuously in minutes until 16:00 ET settlement ($\tau = \frac{\text{minutes}}{365 \times 1440}$).
    - *Reasoning*: For 0-DTE to 3-DTE options, integer day-count conventions introduce massive step-function distortions in annualized implied volatility $\sigma = \sqrt{w/\tau}$.

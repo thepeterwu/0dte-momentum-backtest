@@ -73,6 +73,14 @@ class ExpirySlice:
 def compute_tau(
         timestamp_str: str, expiry_str: str, audit: SliceAuditReport
 ) -> float | None:
+    """
+    Compute time til maturity Tau in terms of years from mins (using 365 days in year)
+    :param timestamp_str: time stamp string
+    :param expiry_str: expiry string
+    :param audit: error report
+    :return: years til maturity
+    """
+
     try:
         ts = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=NY_TZ
@@ -169,8 +177,11 @@ def extract_forward_and_discount(
     discount_factor = -beta_1
     audit.inferred_discount = float(discount_factor)
 
-    min_valid_d = math.exp(-0.12 * tau) - 0.015
-    max_valid_d = math.exp(0.02 * tau) + 0.015
+    # risk-free rate bounds check between -2% to 12%
+    max_rf_rate = 0.12
+    min_rf_rate = -0.02
+    min_valid_d = math.exp(-max_rf_rate * tau) - 0.015
+    max_valid_d = math.exp(-min_rf_rate * tau) + 0.015
 
     if not (min_valid_d <= discount_factor <= max_valid_d):
         audit.status = "REJECTED"
@@ -186,6 +197,7 @@ def extract_forward_and_discount(
     forward = beta_0 / discount_factor
     audit.inferred_forward = float(forward)
 
+    # % diff should be ~(r-q)*tau as F ~= S(1 + (r-q)*tau). We don't expect r-q to exceed +-10%
     drift_buffer = 0.005
     max_allowed_pct_diff = 0.10 * tau + drift_buffer
     pct_diff = abs(forward - spot_ref) / spot_ref
@@ -545,14 +557,12 @@ def invert_iv_newton_raphson(
         )
         return None
 
-    # 3. Moneyness-Aware Initial Volatility Guess
+    # 3. Moneyness-Aware Initial Volatility Guess using ATM Brenner-Subrahmanyam estimate
     abs_x = abs(math.log(F / K))
     norm_price = price / (discount_factor * math.sqrt(F * K))
-
-    # 3a. ATM Brenner-Subrahmanyam estimate
     sigma_atm = SQRT_2PI / math.sqrt(tau) * (price / (discount_factor * F))
 
-    # 3b. OTM Asymptotic Tail estimate (prevents starting in the zero-vega tail)
+    # OTM Asymptotic Tail estimate (prevents starting in the zero-vega tail)
     if abs_x > 1e-4:
         clamped_np = max(1e-12, min(0.45, norm_price))
         sigma_otm = abs_x / math.sqrt(-2.0 * tau * math.log(clamped_np))
