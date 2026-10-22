@@ -71,11 +71,11 @@ class VolSurface:
 
         # Build 1D Natural Cubic Splines in call-delta space for each maturity slice
         # CubicSpline requires strictly increasing x-coordinates, so we index on
-        # put_delta = call_delta - 1.0 (which increases monotonically from -0.90 to -0.10)
-        self.put_deltas = self.call_deltas - 1.0
+        # u = 1.0 - call_delta = |put_delta| which increases strictly from 0.10 (10d Put) to 0.90 (10d Call)
+        self.put_deltas = 1.0 - self.call_deltas
         if np.any(np.diff(self.put_deltas) <= 0):
             raise ValueError(
-                f"[{self.timestamp}] Transformed put_deltas must be strictly increasing."
+                f"[{self.timestamp}] Transformed delta axis must be strictly increasing."
             )
 
         self._delta_w_splines: list[CubicSpline] = []
@@ -186,7 +186,7 @@ class VolSurface:
     ) -> float:
         """Evaluates total variance w(target_delta, tau_i) on maturity slice_idx."""
         call_delta = SmileSlice._normalize_to_call_delta(target_delta)
-        put_delta = call_delta - 1.0
+        put_delta = 1.0 - call_delta
 
         min_put_d = float(self.put_deltas[0])
         max_put_d = float(self.put_deltas[-1])

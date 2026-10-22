@@ -500,23 +500,24 @@ def black76_vega(
 
 
 # =====================================================================
-# IMPLIED VOLATILITY INVERSION (NEWTON-RAPHSON + BRENTQ)
+# IMPLIED VOLATILITY INVERSION (BRACKET-SAFE NEWTON-RAPHSON + BRENTQ)
 # =====================================================================
 def invert_iv_newton_raphson(
-        price: float,
-        F: float,
-        K: float,
-        tau: float,
-        discount_factor: float,
-        is_call: bool,
-        expiry: str = "UNKNOWN",
-        max_iter: int = 20,
-        tol: float = 1e-6,
+    price: float,
+    F: float,
+    K: float,
+    tau: float,
+    discount_factor: float,
+    is_call: bool,
+    expiry: str = "UNKNOWN",
+    max_iter: int = 25,
+    tol: float = 1e-6,
 ) -> float | None:
     """Inverts European market price to Black-76 Implied Volatility.
 
-  Logs any arbitrage bound violations, solver fallbacks, or convergence failures.
-  """
+    Uses a moneyness-aware initial guess and a bracket-guarded Newton-Raphson
+    loop to prevent zero-vega tail underflow and overshoot on OTM wings.
+    """
     right_label = "C" if is_call else "P"
 
     if price <= 0.0 or tau <= 0.0 or F <= 0.0 or K <= 0.0 or discount_factor <= 0.0:
@@ -527,9 +528,7 @@ def invert_iv_newton_raphson(
         return None
 
     # 1. No-arbitrage lower boundary (intrinsic value >= 0)
-    intrinsic = max(
-        0.0, discount_factor * ((F - K) if is_call else (K - F))
-    )
+    intrinsic = max(0.0, discount_factor * ((F - K) if is_call else (K - F)))
     if price < intrinsic - 1e-4:
         audit_logger.warning(
             f"[{expiry} K={K} {right_label}] IV inversion rejected: price"
@@ -546,32 +545,56 @@ def invert_iv_newton_raphson(
         )
         return None
 
-    # 3. Initial Volatility Estimate (Brenner-Subrahmanyam approximation)
-    sigma = max(
-        0.05,
-        min(SQRT_2PI / math.sqrt(tau) * (price / (discount_factor * F)), 2.0),
-    )
+    # 3. Moneyness-Aware Initial Volatility Guess
+    abs_x = abs(math.log(F / K))
+    norm_price = price / (discount_factor * math.sqrt(F * K))
 
-    # 4. Newton-Raphson loop
+    # 3a. ATM Brenner-Subrahmanyam estimate
+    sigma_atm = SQRT_2PI / math.sqrt(tau) * (price / (discount_factor * F))
+
+    # 3b. OTM Asymptotic Tail estimate (prevents starting in the zero-vega tail)
+    if abs_x > 1e-4:
+        clamped_np = max(1e-12, min(0.45, norm_price))
+        sigma_otm = abs_x / math.sqrt(-2.0 * tau * math.log(clamped_np))
+        # Ensure initial guess puts |d1| <= 3.0 so initial Vega is always well-conditioned
+        sigma_min_vega = abs_x / (3.0 * math.sqrt(tau))
+        sigma_0 = max(sigma_atm, sigma_otm, sigma_min_vega)
+    else:
+        sigma_0 = sigma_atm
+
+    sigma_low = 0.005
+    sigma_high = 4.0
+    sigma = max(0.02, min(sigma_0, 2.5))
+
+    # 4. Bracket-Guarded Newton-Raphson Loop (rtsafe hybrid)
     nr_failure_reason = "MAX_ITER_EXCEEDED"
     for _ in range(max_iter):
         p = black76_price(F, K, tau, sigma, discount_factor, is_call)
-        v = black76_vega(F, K, tau, sigma, discount_factor)
         diff = p - price
 
         if abs(diff) < tol:
-            return sigma
+            return float(sigma)
 
-        if v < 1e-8:
-            nr_failure_reason = f"LOW_VEGA ({v:.2e})"
-            break
+        # Tighten the monotonic search bracket [sigma_low, sigma_high]
+        if diff > 0.0:
+            sigma_high = min(sigma_high, sigma)
+        else:
+            sigma_low = max(sigma_low, sigma)
 
-        step = diff / v
-        sigma_next = sigma - step
+        v = black76_vega(F, K, tau, sigma, discount_factor)
 
-        if sigma_next <= 0.001 or sigma_next > 5.0:
-            nr_failure_reason = f"STEP_OUT_OF_BOUNDS ({sigma_next:.4f})"
-            break
+        if v > 1e-8:
+            sigma_next = sigma - (diff / v)
+        else:
+            sigma_next = -1.0  # Force bisection step below
+
+        # If Newton step jumps outside the known bracket [sigma_low, sigma_high],
+        # take a damped bisection step inside the bracket instead of aborting
+        if not (sigma_low < sigma_next < sigma_high):
+            sigma_next = 0.5 * (sigma_low + sigma_high)
+
+        if abs(sigma_next - sigma) < 1e-8:
+            return float(sigma_next)
 
         sigma = sigma_next
 
@@ -585,7 +608,9 @@ def invert_iv_newton_raphson(
         return black76_price(F, K, tau, s, discount_factor, is_call) - price
 
     try:
-        sigma_brent = brentq(objective, a=0.005, b=4.0, xtol=tol, maxiter=30)
+        sigma_brent = brentq(
+            objective, a=sigma_low, b=sigma_high, xtol=tol, maxiter=30
+        )
         return float(sigma_brent)
     except Exception as e:
         audit_logger.error(
