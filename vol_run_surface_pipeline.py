@@ -25,7 +25,7 @@ CSV_FILE_PATH = "spx_options_surface.csv"
 
 # 1. Single-Minute Inspection Mode:
 # Specify "HH:MM" (e.g. "10:46") or full timestamp "YYYY-MM-DD HH:MM:SS"
-TARGET_MINUTE = "11:02"
+TARGET_MINUTE = "10:57"
 SHOW_SLICE_DIAGNOSTICS = True
 
 # 2. Dynamic Time-Slider Animation Mode:

@@ -140,19 +140,25 @@ def plot_single_surface_dashboard(
         dte = s.tau * 365.0
         label = f"{s.expiry} ({dte:.1f}d)"
 
+        # Map market strikes to u = 1 - CallDelta = |PutDelta|
+        u_mkt = 1.0 - np.asarray(
+            s.get_forward_delta(s.x_market, is_call=True), dtype=np.float64
+        )
+
         # Market IV dots
         fig.add_trace(
             go.Scatter(
-                x=s.x_market,
+                x=u_mkt,
                 y=s.iv_market * 100.0,
                 mode="markers",
                 marker=dict(size=6, color=color, symbol="circle-open"),
                 name=f"{label} Mkt",
                 legendgroup=s.expiry,
                 showlegend=False,
+                customdata=u_mkt - 1.0,
                 hovertemplate=(
                     f"<b>{s.expiry} Market</b><br>"
-                    "x = ln(K/F): %{x:+.4f}<br>"
+                    "Put Δ: %{customdata:+.3f}<br>"
                     "Market IV: %{y:.2f}%<extra></extra>"
                 ),
             ),
@@ -160,21 +166,26 @@ def plot_single_surface_dashboard(
             col=2,
         )
 
-        # Fitted Continuous Spline Curve
-        x_dense = np.linspace(s.x_left - 0.01, s.x_right + 0.01, 120)
-        iv_dense_pct = np.asarray(s.get_iv(x_dense), dtype=np.float64) * 100.0
+        # Fitted Continuous Spline Curve mapped to Delta
+        x_dense = np.linspace(s.x_left - 0.015, s.x_right + 0.015, 160)
+        u_dense = 1.0 - np.asarray(
+            s.get_forward_delta(x_dense, is_call=True), dtype=np.float64
+        )
+        mask = (u_dense >= 0.02) & (u_dense <= 0.98)
+        iv_dense_pct = np.asarray(s.get_iv(x_dense[mask]), dtype=np.float64) * 100.0
 
         fig.add_trace(
             go.Scatter(
-                x=x_dense,
+                x=u_dense[mask],
                 y=iv_dense_pct,
                 mode="lines",
                 line=dict(color=color, width=2),
                 name=label,
                 legendgroup=s.expiry,
+                customdata=u_dense[mask] - 1.0,
                 hovertemplate=(
                     f"<b>{s.expiry} Spline</b><br>"
-                    "x = ln(K/F): %{x:+.4f}<br>"
+                    "Put Δ: %{customdata:+.2f}<br>"
                     "Spline IV: %{y:.2f}%<extra></extra>"
                 ),
             ),
@@ -210,9 +221,14 @@ def plot_single_surface_dashboard(
             camera=dict(eye=dict(x=-1.55, y=-1.45, z=0.85)),
         ),
         xaxis=dict(
-            title="Forward Log-Moneyness x = ln(K / F)",
-            zeroline=True,
-            zerolinecolor="rgba(255,255,255,0.25)",
+            title="Option Delta (Put Δ from -0.10 to -0.90)",
+            range=[0.0, 1.0],
+            tickmode="array",
+            tickvals=np.round(np.arange(0.1, 1.0, 0.1), 1),
+            ticktext=["-0.1", "-0.2", "-0.3", "-0.4", "-0.5", "-0.6", "-0.7", "-0.8", "-0.9"],
+            showgrid=True,
+            gridcolor="rgba(255, 255, 255, 0.10)",
+            minor=dict(dtick=0.05, showgrid=True, gridcolor="rgba(255, 255, 255, 0.04)"),
         ),
         yaxis=dict(title="Implied Volatility (%)"),
         legend=dict(
@@ -241,10 +257,10 @@ def plot_slice_diagnostics(
     show_fig: bool = True,
     save_html: str | None = None,
 ) -> go.Figure:
-    """Plots a 2-row diagnostic chart across all expiries:
+    """Plots a 2-row diagnostic chart across all expiries against Option Delta:
 
-    Row 1: Fitted Total Variance / IV Smiles with solved Delta Pillars.
-    Row 2: Gatheral's Risk-Neutral Density g(x) with the g(x) = 0 no-arbitrage floor.
+    Row 1: Fitted Volatility Smiles, Raw Market Quotes, & Solved Delta Pillars.
+    Row 2: Gatheral's Risk-Neutral Density g(Delta) with the g = 0 no-arbitrage floor.
     """
     fig = make_subplots(
         rows=2,
@@ -253,64 +269,131 @@ def plot_slice_diagnostics(
         vertical_spacing=0.08,
         row_heights=[0.60, 0.40],
         subplot_titles=(
-            f"Calibrated Volatility Smiles & Solved Delta Pillars ({surface.timestamp})",
-            "Gatheral Butterfly Density Condition g(x) (Arbitrage-Free requires g(x) ≥ 0)",
+            f"Calibrated Volatility Smiles in Delta Space ({surface.timestamp})",
+            "Gatheral Butterfly Density Condition g(Δ) (Arbitrage-Free requires g ≥ 0)",
         ),
     )
 
     palette = ["#00e5ff", "#00e676", "#ffea00", "#ff9100", "#ff5252", "#d500f9"]
 
+    # Standardized u = 1 - CallDelta = |PutDelta| coordinates for the solved pillars
+    u_pillars = 1.0 - surface.call_deltas
+
     for idx, s in enumerate(surface.slices):
         color = palette[idx % len(palette)]
         dte = s.tau * 365.0
-        x_dense = np.linspace(s.x_left - 0.01, s.x_right + 0.01, 150)
-        iv_dense_pct = np.asarray(s.get_iv(x_dense), dtype=np.float64) * 100.0
-        g_dense = np.asarray(s.compute_density_g(x_dense), dtype=np.float64)
 
-        # Row 1: Spline Curve
-        fig.add_trace(
-            go.Scatter(
-                x=x_dense,
-                y=iv_dense_pct,
-                mode="lines",
-                line=dict(color=color, width=2),
-                name=f"{s.expiry} ({dte:.1f}d)",
-                legendgroup=s.expiry,
-            ),
-            row=1,
-            col=1,
+        # Evaluate dense log-moneyness grid and map to continuous delta coordinate u = 1 - CallDelta
+        x_dense = np.linspace(s.x_left - 0.015, s.x_right + 0.015, 200)
+        call_delta_dense = np.asarray(
+            s.get_forward_delta(x_dense, is_call=True), dtype=np.float64
+        )
+        u_dense = 1.0 - call_delta_dense
+
+        # Filter to the [0.02, 0.98] delta band so extreme asymptotic tails don't bunch up at 0 and 1
+        band_mask = (u_dense >= 0.02) & (u_dense <= 0.98)
+        u_plot = u_dense[band_mask]
+        x_plot = x_dense[band_mask]
+
+        iv_dense_pct = np.asarray(s.get_iv(x_plot), dtype=np.float64) * 100.0
+        g_dense = np.asarray(s.compute_density_g(x_plot), dtype=np.float64)
+
+        # Also map observed discrete market quotes to their delta coordinates
+        u_mkt = 1.0 - np.asarray(
+            s.get_forward_delta(s.x_market, is_call=True), dtype=np.float64
         )
 
-        # Row 1: Solved Delta Pillars (Diamonds)
+        # Row 1A: Fitted Spline Curve in Delta Space
         fig.add_trace(
             go.Scatter(
-                x=surface.x_grid[idx, :],
-                y=surface.iv_grid[idx, :] * 100.0,
-                mode="markers",
-                marker=dict(size=8, color=color, symbol="diamond", line=dict(width=1, color="#fff")),
-                name=f"{s.expiry} Delta Pillars",
+                x=u_plot,
+                y=iv_dense_pct,
+                mode="lines",
+                line=dict(color=color, width=2.2),
+                name=f"{s.expiry} ({dte:.1f}d)",
                 legendgroup=s.expiry,
-                showlegend=False,
-                text=[f"Δ={d:+.2f}" for d in surface.delta_pillars],
+                customdata=np.column_stack([u_plot - 1.0, x_plot]),
                 hovertemplate=(
-                    f"<b>{s.expiry} Pillar</b><br>"
-                    "%{text}<br>x=%{x:+.4f}<br>IV=%{y:.2f}%<extra></extra>"
+                    f"<b>{s.expiry} Spline</b><br>"
+                    "Put Δ: %{customdata[0]:+.2f} (u=%{x:.2f})<br>"
+                    "x = ln(K/F): %{customdata[1]:+.4f}<br>"
+                    "Spline IV: %{y:.2f}%<extra></extra>"
                 ),
             ),
             row=1,
             col=1,
         )
 
-        # Row 2: Gatheral Density g(x)
+        # Row 1B: Raw Market Quotes (Open Circles) at their floating market deltas
         fig.add_trace(
             go.Scatter(
-                x=x_dense,
+                x=u_mkt,
+                y=s.iv_market * 100.0,
+                mode="markers",
+                marker=dict(size=5.5, color=color, symbol="circle-open"),
+                name=f"{s.expiry} Market Quotes",
+                legendgroup=s.expiry,
+                showlegend=False,
+                customdata=np.column_stack([u_mkt - 1.0, s.strikes]),
+                hovertemplate=(
+                    f"<b>{s.expiry} Market Quote</b><br>"
+                    "Strike K: %{customdata[1]:.0f}<br>"
+                    "Put Δ: %{customdata[0]:+.3f}<br>"
+                    "Market IV: %{y:.2f}%<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Row 1C: Solved Standardized Delta Pillars (Diamonds aligned vertically!)
+        fig.add_trace(
+            go.Scatter(
+                x=u_pillars,
+                y=surface.iv_grid[idx, :] * 100.0,
+                mode="markers",
+                marker=dict(
+                    size=8.5,
+                    color=color,
+                    symbol="diamond",
+                    line=dict(width=1.2, color="#ffffff"),
+                ),
+                name=f"{s.expiry} Delta Pillars",
+                legendgroup=s.expiry,
+                showlegend=False,
+                customdata=np.column_stack([
+                    surface.delta_pillars,
+                    surface.strike_grid[idx, :],
+                    surface.x_grid[idx, :],
+                ]),
+                hovertemplate=(
+                    f"<b>{s.expiry} Anchor Pillar</b><br>"
+                    "Target Δ: %{customdata[0]:+.2f}<br>"
+                    "Solved Strike K*: %{customdata[1]:.2f}<br>"
+                    "Solved x*: %{customdata[2]:+.4f}<br>"
+                    "Interpolated IV: %{y:.2f}%<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Row 2: Gatheral Density g(x) plotted against Delta
+        fig.add_trace(
+            go.Scatter(
+                x=u_plot,
                 y=g_dense,
                 mode="lines",
                 line=dict(color=color, width=1.8),
-                name=f"{s.expiry} g(x)",
+                name=f"{s.expiry} g(Δ)",
                 legendgroup=s.expiry,
                 showlegend=False,
+                customdata=u_plot - 1.0,
+                hovertemplate=(
+                    f"<b>{s.expiry} Density</b><br>"
+                    "Put Δ: %{customdata:+.2f}<br>"
+                    "g(x): %{y:+.4f}<extra></extra>"
+                ),
             ),
             row=2,
             col=1,
@@ -322,19 +405,55 @@ def plot_slice_diagnostics(
         line_dash="dash",
         line_color="#ff5252",
         line_width=1.5,
-        annotation_text="No-Arbitrage Floor g(x) = 0",
+        annotation_text="No-Arbitrage Floor g = 0",
         annotation_position="bottom right",
         row=2,
         col=1,
     )
 
+    # 0.1 Subgrid Tick Configuration (u from 0.1 to 0.9)
+    tick_vals = np.round(np.arange(0.1, 1.0, 0.1), 1)
+    # Trader OTM labels with Put Delta in parentheses:
+    tick_labels = [
+        "10Δ Put<br>(-0.10)",
+        "20Δ Put<br>(-0.20)",
+        "30Δ Put<br>(-0.30)",
+        "40Δ Put<br>(-0.40)",
+        "50Δ ATM<br>(-0.50)",
+        "40Δ Call<br>(-0.60)",
+        "30Δ Call<br>(-0.70)",
+        "20Δ Call<br>(-0.80)",
+        "10Δ Call<br>(-0.90)",
+    ]
+
+    axis_style = dict(
+        range=[0.0, 1.0],
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_labels,
+        showgrid=True,
+        gridcolor="rgba(255, 255, 255, 0.10)",
+        gridwidth=1,
+        minor=dict(
+            dtick=0.05,  # 0.05 minor subgrid lines (captures 25d Put at 0.25 and 25d Call at 0.75)
+            showgrid=True,
+            gridcolor="rgba(255, 255, 255, 0.04)",
+            gridwidth=0.5,
+        ),
+        zeroline=False,
+    )
+
     fig.update_layout(
         template="plotly_dark",
-        height=760,
-        margin=dict(l=45, r=30, t=55, b=40),
-        xaxis2=dict(title="Forward Log-Moneyness x = ln(K / F)"),
+        height=780,
+        margin=dict(l=55, r=30, t=60, b=55),
+        xaxis=axis_style,
+        xaxis2=dict(
+            **axis_style,
+            title="Option Delta (OTM Trader Convention & Unified Put Delta Δp)",
+        ),
         yaxis=dict(title="Implied Volatility (%)"),
-        yaxis2=dict(title="Density g(x)"),
+        yaxis2=dict(title="Gatheral Density g(x)"),
     )
 
     if save_html:
